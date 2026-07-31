@@ -98,8 +98,24 @@ pub trait FlowRepository: Send + Sync {
         &self,
         connection_id: &str,
     ) -> Result<Option<ConnectionProfile>, PortError>;
+    async fn load_runnable_connection(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<ConnectionProfile>, PortError> {
+        let profile = self.load_connection(connection_id).await?;
+        if profile.as_ref().is_some_and(|profile| !profile.enabled) {
+            return Err(PortError::new(
+                "CONNECTION_DISABLED",
+                "connection is disabled",
+            ));
+        }
+        Ok(profile)
+    }
     async fn save_connection(&self, profile: &ConnectionProfile) -> Result<(), PortError>;
     async fn list_connections(&self) -> Result<Vec<ConnectionProfile>, PortError>;
+    async fn update_connection(&self, profile: &ConnectionProfile) -> Result<(), PortError>;
+    async fn disable_connection(&self, connection_id: &str) -> Result<(), PortError>;
+    async fn delete_connection(&self, connection_id: &str) -> Result<(), PortError>;
 }
 
 #[async_trait]

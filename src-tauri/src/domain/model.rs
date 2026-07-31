@@ -18,6 +18,7 @@ pub struct ConnectionProfile {
     pub service_name: String,
     pub username: String,
     pub credential_ref: String,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

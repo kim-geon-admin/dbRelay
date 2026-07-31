@@ -49,6 +49,7 @@ async fn factory_sessions_are_isolated_while_the_observer_keeps_each_open_log() 
         service_name: "XE".into(),
         username: "scott".into(),
         credential_ref: "credential://source".into(),
+        enabled: true,
     };
 
     let mut first = factory.open(&profile, &secret).await.unwrap();
