@@ -1,5 +1,8 @@
-.superpowers/
-.worktrees/
 node_modules/
 dist/
+.vite/
+.superpowers/
+.worktrees/
 src-tauri/target/
+src-tauri/gen/
+*.log
