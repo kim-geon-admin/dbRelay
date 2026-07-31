@@ -39,20 +39,17 @@ impl std::error::Error for PortError {}
 ///
 /// The inner value is intentionally inaccessible outside this crate so ports
 /// cannot accidentally serialize, log, or return it through a command DTO.
-pub struct ResolvedSecret(String);
+#[derive(Clone)]
+pub struct ResolvedSecret(std::sync::Arc<str>);
 
 impl ResolvedSecret {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into().into())
     }
 
     #[allow(dead_code)] // Consumed by the concrete connector introduced in Task 8.
     pub(crate) fn expose(&self) -> &str {
         &self.0
-    }
-
-    pub(crate) fn into_inner(self) -> String {
-        self.0
     }
 }
 
