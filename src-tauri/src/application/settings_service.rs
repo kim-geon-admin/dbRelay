@@ -25,9 +25,7 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
         profile: &ConnectionProfile,
         credential: ResolvedSecret,
     ) -> Result<(), PortError> {
-        self.credentials
-            .store(&profile.credential_ref, credential)
-            .await?;
+        self.credentials.store(&profile.id, credential).await?;
         self.repository.save_connection(profile).await
     }
 
@@ -45,9 +43,7 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
         let mut updated = profile.clone();
         updated.credential_ref = existing.credential_ref;
         if let Some(credential) = replacement {
-            self.credentials
-                .store(&updated.credential_ref, credential)
-                .await?;
+            self.credentials.store(&updated.id, credential).await?;
         }
         self.repository.update_connection(&updated).await
     }
@@ -74,7 +70,7 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
                 "connector kind does not match",
             ));
         }
-        let credential = self.credentials.resolve(&profile.credential_ref).await?;
+        let credential = self.credentials.resolve(&profile.id).await?;
         let _session = connector.open(&profile, &credential).await?;
         Ok(())
     }

@@ -81,6 +81,15 @@ impl RunError {
             _ => None,
         }
     }
+
+    pub fn history_code(&self) -> String {
+        match self {
+            Self::Connector(error) => super::mask_sensitive_text(error.code()),
+            Self::InvalidTransition { .. } => "INVALID_TRANSITION".into(),
+            Self::InvalidStep { .. } => "INVALID_STEP".into(),
+            Self::StepOutOfBounds { .. } => "STEP_OUT_OF_BOUNDS".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -188,12 +197,33 @@ impl RunState {
         self.status.clone()
     }
 
+    pub fn policy(&self) -> TransactionPolicy {
+        self.policy
+    }
+
     pub fn steps(&self) -> &[RunStep] {
         &self.steps
     }
 
     pub fn events(&self) -> &[RunEvent] {
         &self.events
+    }
+
+    pub fn from_history(
+        policy: TransactionPolicy,
+        status: RunStatus,
+        step_statuses: Vec<StepStatus>,
+        events: Vec<RunEvent>,
+    ) -> Self {
+        Self {
+            policy,
+            status,
+            steps: step_statuses
+                .into_iter()
+                .map(|status| RunStep { status })
+                .collect(),
+            events,
+        }
     }
 
     pub fn record_step_success(&mut self, step: usize, affected_rows: u64) -> Result<(), RunError> {

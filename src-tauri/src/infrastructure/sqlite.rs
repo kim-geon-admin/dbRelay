@@ -4,18 +4,102 @@ use std::{
 };
 
 use async_trait::async_trait;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     application::ports::{FlowRepository, HistoryRepository, PortError},
     domain::{
-        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunEvent, RunState,
-        TransactionPolicy,
+        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
+        RunStatus, StepStatus, TransactionPolicy,
     },
 };
 
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredRun {
+    policy: TransactionPolicy,
+    status: RunStatus,
+    steps: Vec<StepStatus>,
+    events: Vec<StoredRunEvent>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+enum StoredRunEvent {
+    StepSucceeded { step: usize, affected_rows: u64 },
+    StepFailed { step: usize, error_code: String },
+    RecoveryApplied { step: usize, action: RecoveryAction },
+}
+
+impl StoredRun {
+    fn from_state(state: &RunState) -> Self {
+        Self {
+            policy: state.policy(),
+            status: state.status(),
+            steps: state
+                .steps()
+                .iter()
+                .map(|step| step.status.clone())
+                .collect(),
+            events: state
+                .events()
+                .iter()
+                .map(StoredRunEvent::from_run_event)
+                .collect(),
+        }
+    }
+
+    fn into_state(self) -> RunState {
+        let events = self
+            .events
+            .into_iter()
+            .map(StoredRunEvent::into_run_event)
+            .collect();
+        RunState::from_history(self.policy, self.status, self.steps, events)
+    }
+}
+
+impl StoredRunEvent {
+    fn from_run_event(event: &RunEvent) -> Self {
+        match event {
+            RunEvent::StepSucceeded {
+                step,
+                affected_rows,
+            } => Self::StepSucceeded {
+                step: *step,
+                affected_rows: *affected_rows,
+            },
+            RunEvent::StepFailed { step, error } => Self::StepFailed {
+                step: *step,
+                error_code: error.history_code(),
+            },
+            RunEvent::RecoveryApplied { step, action } => Self::RecoveryApplied {
+                step: *step,
+                action: *action,
+            },
+        }
+    }
+
+    fn into_run_event(self) -> RunEvent {
+        match self {
+            Self::StepSucceeded {
+                step,
+                affected_rows,
+            } => RunEvent::StepSucceeded {
+                step,
+                affected_rows,
+            },
+            Self::StepFailed { step, error_code } => RunEvent::StepFailed {
+                step,
+                error: RunError::connector(error_code, "sanitized persisted run error"),
+            },
+            Self::RecoveryApplied { step, action } => RunEvent::RecoveryApplied { step, action },
+        }
+    }
 }
 
 impl SqliteStore {
@@ -28,7 +112,7 @@ impl SqliteStore {
         Self::from_connection(Connection::open_in_memory().map_err(sqlite_error)?)
     }
 
-    fn from_connection(connection: Connection) -> Result<Self, PortError> {
+    fn from_connection(mut connection: Connection) -> Result<Self, PortError> {
         connection
             .execute_batch(
                 "
@@ -47,8 +131,8 @@ impl SqliteStore {
                 CREATE TABLE IF NOT EXISTS flows (
                     id TEXT PRIMARY KEY NOT NULL,
                     name TEXT NOT NULL,
-                    source_connection_id TEXT NOT NULL,
-                    target_connection_id TEXT NOT NULL,
+                    source_connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE RESTRICT,
+                    target_connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE RESTRICT,
                     transaction_policy TEXT NOT NULL,
                     version INTEGER NOT NULL
                 );
@@ -72,13 +156,15 @@ impl SqliteStore {
                 );
                 CREATE TABLE IF NOT EXISTS recovery_events (
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
                     position INTEGER NOT NULL,
                     action TEXT NOT NULL,
-                    PRIMARY KEY (run_id, position)
+                    PRIMARY KEY (run_id, sequence)
                 );
                 ",
             )
             .map_err(sqlite_error)?;
+        migrate_legacy_schema(&mut connection).map_err(sqlite_error)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -175,29 +261,41 @@ impl SqliteStore {
     }
 
     pub fn delete_connection(&self, connection_id: &str) -> Result<(), PortError> {
-        let referenced = self.with_connection(|connection| {
-            connection.query_row(
+        let outcome = self.with_connection(|connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let exists = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connection_profiles WHERE id = ?1)",
+                [connection_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let referenced = transaction.query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM flows
                     WHERE source_connection_id = ?1 OR target_connection_id = ?1
                 )",
                 [connection_id],
                 |row| row.get::<_, bool>(0),
-            )
+            )?;
+            let deleted = if exists && !referenced {
+                transaction.execute(
+                    "DELETE FROM connection_profiles WHERE id = ?1",
+                    [connection_id],
+                )?;
+                true
+            } else {
+                false
+            };
+            transaction.commit()?;
+            Ok((exists, referenced, deleted))
         })?;
-        if referenced {
+        if outcome.1 {
             return Err(PortError::new(
                 "CONNECTION_REFERENCED",
                 "connection is referenced by a flow",
             ));
         }
-        let changed = self.with_connection(|connection| {
-            connection.execute(
-                "DELETE FROM connection_profiles WHERE id = ?1",
-                [connection_id],
-            )
-        })?;
-        if changed == 0 {
+        if !outcome.0 || !outcome.2 {
             return Err(PortError::new(
                 "CONNECTION_NOT_FOUND",
                 "connection not found",
@@ -261,7 +359,8 @@ impl SqliteStore {
     }
 
     pub fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
-        let state_json = serde_json::to_string(state).map_err(|_| {
+        let stored_run = StoredRun::from_state(state);
+        let state_json = serde_json::to_string(&stored_run).map_err(|_| {
             PortError::new("HISTORY_SERIALIZATION", "run history could not be saved")
         })?;
         let step_statuses = state
@@ -291,11 +390,11 @@ impl SqliteStore {
                     params![run_id, *position as i64, status_json],
                 )?;
             }
-            for event in state.events() {
+            for (sequence, event) in state.events().iter().enumerate() {
                 if let RunEvent::RecoveryApplied { step, action } = event {
                     transaction.execute(
-                        "INSERT INTO recovery_events (run_id, position, action) VALUES (?1, ?2, ?3)",
-                        params![run_id, *step as i64, recovery_action(*action)],
+                        "INSERT INTO recovery_events (run_id, sequence, position, action) VALUES (?1, ?2, ?3, ?4)",
+                        params![run_id, sequence as i64, *step as i64, recovery_action(*action)],
                     )?;
                 }
             }
@@ -317,11 +416,25 @@ impl SqliteStore {
         })?;
         state_json
             .map(|json| {
-                serde_json::from_str(&json).map_err(|_| {
-                    PortError::new("HISTORY_DESERIALIZATION", "run history could not be loaded")
-                })
+                serde_json::from_str::<StoredRun>(&json)
+                    .map(StoredRun::into_state)
+                    .map_err(|_| {
+                        PortError::new("HISTORY_DESERIALIZATION", "run history could not be loaded")
+                    })
             })
             .transpose()
+    }
+
+    #[doc(hidden)]
+    pub fn recovery_event_count_for_test(&self, run_id: &str) -> usize {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM recovery_events WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap_or_default()
     }
 
     #[doc(hidden)]
@@ -542,4 +655,100 @@ fn recovery_action(action: RecoveryAction) -> &'static str {
 
 fn sqlite_error(_error: rusqlite::Error) -> PortError {
     PortError::new("SQLITE", "local metadata storage failed")
+}
+
+fn migrate_legacy_schema(connection: &mut Connection) -> rusqlite::Result<()> {
+    let rebuild_flows = !flows_reference_connection_profiles(connection)?;
+    let rebuild_recovery_events = !table_has_column(connection, "recovery_events", "sequence")?;
+    if !rebuild_flows && !rebuild_recovery_events {
+        return Ok(());
+    }
+
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let migration = (|| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if rebuild_flows {
+            transaction.execute_batch(
+                "
+                ALTER TABLE query_steps RENAME TO query_steps_legacy;
+                ALTER TABLE flows RENAME TO flows_legacy;
+                CREATE TABLE flows (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    source_connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE RESTRICT,
+                    target_connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE RESTRICT,
+                    transaction_policy TEXT NOT NULL,
+                    version INTEGER NOT NULL
+                );
+                CREATE TABLE query_steps (
+                    flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    id TEXT NOT NULL,
+                    select_sql TEXT NOT NULL,
+                    upsert_sql TEXT NOT NULL,
+                    PRIMARY KEY (flow_id, position)
+                );
+                INSERT INTO flows (id, name, source_connection_id, target_connection_id, transaction_policy, version)
+                    SELECT id, name, source_connection_id, target_connection_id, transaction_policy, version
+                    FROM flows_legacy;
+                INSERT INTO query_steps (flow_id, position, id, select_sql, upsert_sql)
+                    SELECT flow_id, position, id, select_sql, upsert_sql FROM query_steps_legacy;
+                DROP TABLE query_steps_legacy;
+                DROP TABLE flows_legacy;
+                ",
+            )?;
+        }
+        if rebuild_recovery_events {
+            transaction.execute_batch(
+                "
+                ALTER TABLE recovery_events RENAME TO recovery_events_legacy;
+                CREATE TABLE recovery_events (
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    PRIMARY KEY (run_id, sequence)
+                );
+                INSERT INTO recovery_events (run_id, sequence, position, action)
+                    SELECT run_id, rowid, position, action FROM recovery_events_legacy;
+                DROP TABLE recovery_events_legacy;
+                ",
+            )?;
+        }
+        transaction.commit()
+    })();
+    let restore_foreign_keys = connection.pragma_update(None, "foreign_keys", "ON");
+    migration.and(restore_foreign_keys)
+}
+
+fn flows_reference_connection_profiles(connection: &Connection) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_list(flows)")?;
+    let references = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(references.iter().any(|(table, column)| {
+        table == "connection_profiles"
+            && matches!(
+                column.as_str(),
+                "source_connection_id" | "target_connection_id"
+            )
+    }) && references
+        .iter()
+        .filter(|(table, _)| table == "connection_profiles")
+        .count()
+        == 2)
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|column| column == column_name))
 }

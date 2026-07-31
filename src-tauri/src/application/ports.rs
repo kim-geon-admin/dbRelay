@@ -83,9 +83,10 @@ pub trait DatabaseSession: Send {
 
 #[async_trait]
 pub trait CredentialStore: Send + Sync {
-    async fn store(&self, credential_ref: &str, secret: ResolvedSecret) -> Result<(), PortError>;
-    async fn resolve(&self, credential_ref: &str) -> Result<ResolvedSecret, PortError>;
-    async fn delete(&self, credential_ref: &str) -> Result<(), PortError>;
+    /// Uses the stable connection ID as the credential-manager account name.
+    async fn store(&self, connection_id: &str, secret: ResolvedSecret) -> Result<(), PortError>;
+    async fn resolve(&self, connection_id: &str) -> Result<ResolvedSecret, PortError>;
+    async fn delete(&self, connection_id: &str) -> Result<(), PortError>;
 }
 
 #[async_trait]
