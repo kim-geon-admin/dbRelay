@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{error_masking::mask_sensitive_text_with_values, TransactionPolicy};
 
@@ -41,12 +41,9 @@ pub enum RunEvent {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(rename_all = "snake_case", tag = "type", content = "detail")]
 pub enum RunError {
-    Connector {
-        code: String,
-        message: String,
-    },
+    Connector(ConnectorError),
     InvalidTransition {
         status: RunStatus,
         action: RecoveryAction,
@@ -55,14 +52,15 @@ pub enum RunError {
         expected: usize,
         received: usize,
     },
+    StepOutOfBounds {
+        step: usize,
+        step_count: usize,
+    },
 }
 
 impl RunError {
     pub fn connector(code: impl Into<String>, message: impl AsRef<str>) -> Self {
-        Self::Connector {
-            code: code.into(),
-            message: super::mask_sensitive_text(message.as_ref()),
-        }
+        Self::Connector(ConnectorError::new(code, message))
     }
 
     pub fn connector_with_credential_values(
@@ -70,7 +68,41 @@ impl RunError {
         message: impl AsRef<str>,
         credential_values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        Self::Connector {
+        Self::Connector(ConnectorError::with_credential_values(
+            code,
+            message,
+            credential_values,
+        ))
+    }
+
+    pub fn connector_message(&self) -> Option<&str> {
+        match self {
+            Self::Connector(error) => Some(error.message()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConnectorError {
+    code: String,
+    message: String,
+}
+
+impl ConnectorError {
+    fn new(code: impl Into<String>, message: impl AsRef<str>) -> Self {
+        Self {
+            code: code.into(),
+            message: super::mask_sensitive_text(message.as_ref()),
+        }
+    }
+
+    fn with_credential_values(
+        code: impl Into<String>,
+        message: impl AsRef<str>,
+        credential_values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
             code: code.into(),
             message: mask_sensitive_text_with_values(
                 message.as_ref(),
@@ -80,6 +112,30 @@ impl RunError {
                     .collect::<Vec<_>>(),
             ),
         }
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl<'de> Deserialize<'de> for ConnectorError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireError {
+            code: String,
+            message: String,
+        }
+
+        let wire = WireError::deserialize(deserializer)?;
+        Ok(Self::new(wire.code, wire.message))
     }
 }
 
@@ -100,7 +156,11 @@ impl RunState {
     pub fn running(policy: TransactionPolicy, step_count: usize) -> Self {
         Self {
             policy,
-            status: RunStatus::Running { step: 0 },
+            status: if step_count == 0 {
+                RunStatus::Completed
+            } else {
+                RunStatus::Running { step: 0 }
+            },
             steps: vec![
                 RunStep {
                     status: StepStatus::NotRun,
@@ -111,13 +171,17 @@ impl RunState {
         }
     }
 
-    pub fn awaiting_recovery_after_step(failed_step: usize, step_count: usize) -> Self {
+    pub fn awaiting_recovery_after_step(
+        failed_step: usize,
+        step_count: usize,
+    ) -> Result<Self, RunError> {
         let mut state = Self::running(TransactionPolicy::CommitSuccesses, step_count);
-        if let Some(step) = state.steps.get_mut(failed_step) {
-            step.status = StepStatus::Failed;
-        }
+        state.validate_step(failed_step)?;
+        let error = state.out_of_bounds(failed_step);
+        let step = state.steps.get_mut(failed_step).ok_or(error)?;
+        step.status = StepStatus::Failed;
         state.status = RunStatus::AwaitingRecovery { failed_step };
-        state
+        Ok(state)
     }
 
     pub fn status(&self) -> RunStatus {
@@ -134,7 +198,9 @@ impl RunState {
 
     pub fn record_step_success(&mut self, step: usize, affected_rows: u64) -> Result<(), RunError> {
         self.require_running_step(step)?;
-        self.steps[step].status = StepStatus::Succeeded { affected_rows };
+        let error = self.out_of_bounds(step);
+        let run_step = self.steps.get_mut(step).ok_or(error)?;
+        run_step.status = StepStatus::Succeeded { affected_rows };
         self.events.push(RunEvent::StepSucceeded {
             step,
             affected_rows,
@@ -160,6 +226,7 @@ impl RunState {
                 action,
             });
         };
+        self.validate_step(failed_step)?;
 
         self.events.push(RunEvent::RecoveryApplied {
             step: failed_step,
@@ -169,7 +236,9 @@ impl RunState {
         match action {
             RecoveryAction::EditAndRetry => self.status = RunStatus::Running { step: failed_step },
             RecoveryAction::SkipAndContinue => {
-                self.steps[failed_step].status = StepStatus::SkippedByUser;
+                let error = self.out_of_bounds(failed_step);
+                let step = self.steps.get_mut(failed_step).ok_or(error)?;
+                step.status = StepStatus::SkippedByUser;
                 if failed_step + 1 == self.steps.len() {
                     self.status = RunStatus::Completed;
                 } else {
@@ -192,7 +261,9 @@ impl RunState {
             });
         };
 
-        if step + 1 == self.steps.len() {
+        self.validate_step(step)?;
+
+        if step == self.steps.len() - 1 {
             self.status = RunStatus::Completed;
         } else {
             self.status = RunStatus::Running { step: step + 1 };
@@ -202,7 +273,7 @@ impl RunState {
 
     fn require_running_step(&self, step: usize) -> Result<(), RunError> {
         match self.status {
-            RunStatus::Running { step: expected } if expected == step => Ok(()),
+            RunStatus::Running { step: expected } if expected == step => self.validate_step(step),
             RunStatus::Running { step: expected } => Err(RunError::InvalidStep {
                 expected,
                 received: step,
@@ -211,6 +282,21 @@ impl RunState {
                 status: self.status.clone(),
                 action: RecoveryAction::EditAndRetry,
             }),
+        }
+    }
+
+    fn validate_step(&self, step: usize) -> Result<(), RunError> {
+        if step < self.steps.len() {
+            Ok(())
+        } else {
+            Err(self.out_of_bounds(step))
+        }
+    }
+
+    fn out_of_bounds(&self, step: usize) -> RunError {
+        RunError::StepOutOfBounds {
+            step,
+            step_count: self.steps.len(),
         }
     }
 }

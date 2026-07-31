@@ -9,4 +9,6 @@ pub use model::{
     ConnectionProfile, DbKind, Flow, MappingError, NamedRow, QueryStep, Row, RowSet,
     TransactionPolicy, Value,
 };
-pub use run_state::{RecoveryAction, RunError, RunEvent, RunState, RunStatus, StepStatus};
+pub use run_state::{
+    ConnectorError, RecoveryAction, RunError, RunEvent, RunState, RunStatus, StepStatus,
+};

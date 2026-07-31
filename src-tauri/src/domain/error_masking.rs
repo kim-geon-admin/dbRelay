@@ -8,7 +8,13 @@ pub fn mask_sensitive_text(text: &str) -> String {
 pub(crate) fn mask_sensitive_text_with_values(text: &str, values: &[String]) -> String {
     let mut masked = mask_named_values(text);
 
-    for value in values.iter().filter(|value| !value.is_empty()) {
+    let mut values = values
+        .iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+
+    for value in values {
         masked = replace_case_insensitive(&masked, value, REDACTED);
     }
 
