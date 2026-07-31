@@ -19,6 +19,16 @@ fn production_library_does_not_export_test_fakes() {
         .exists());
 }
 
+#[test]
+fn production_ports_do_not_offer_a_raw_secret_constructor() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ports = std::fs::read_to_string(manifest_dir.join("src/application/ports.rs"))
+        .expect("ports module should exist");
+
+    assert!(!ports.contains("pub fn new(value: impl Into<String>) -> Self"));
+    assert!(ports.contains("#[cfg(feature = \"test-support\")]"));
+}
+
 #[tokio::test]
 async fn factory_sessions_are_isolated_while_the_observer_keeps_each_open_log() {
     let factory = FakeConnectorFactory::with_session(

@@ -249,7 +249,7 @@ impl MemoryCredentialStore {
         self.secrets
             .lock()
             .expect("memory credential store lock poisoned")
-            .insert(credential_ref.into(), ResolvedSecret::new(secret));
+            .insert(credential_ref.into(), ResolvedSecret::for_test(secret));
     }
 }
 

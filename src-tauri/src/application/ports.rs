@@ -43,8 +43,15 @@ impl std::error::Error for PortError {}
 pub struct ResolvedSecret(std::sync::Arc<str>);
 
 impl ResolvedSecret {
-    pub fn new(value: impl Into<String>) -> Self {
+    #[allow(dead_code)] // Consumed by the credential implementation introduced in Task 5.
+    pub(crate) fn new(value: impl Into<String>) -> Self {
         Self(value.into().into())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn for_test(value: impl Into<String>) -> Self {
+        Self::new(value)
     }
 
     #[allow(dead_code)] // Consumed by the concrete connector introduced in Task 8.
