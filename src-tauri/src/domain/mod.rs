@@ -10,8 +10,8 @@ pub use mapping::{
     validate_source_statement, validate_target_statement,
 };
 pub use model::{
-    ConnectionProfile, DbKind, Flow, MappingError, NamedRow, QueryStep, Row, RowSet,
-    TransactionPolicy, ValidationError, Value,
+    ConnectionProfile, DbKind, Flow, MappingError, NamedRow, OracleDate, OracleTimestamp,
+    QueryStep, Row, RowSet, TransactionPolicy, ValidationError, Value,
 };
 pub use run_state::{
     ConnectorError, RecoveryAction, RunError, RunEvent, RunState, RunStatus, StepStatus,

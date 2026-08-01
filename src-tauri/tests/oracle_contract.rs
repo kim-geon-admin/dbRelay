@@ -1,6 +1,6 @@
 use db_relay::{
     connectors::{ConnectorRegistry, OracleConnector},
-    domain::{ConnectionProfile, DbKind, NamedRow, Row, Value},
+    domain::{ConnectionProfile, DbKind, NamedRow, OracleDate, OracleTimestamp, Row, Value},
 };
 use std::collections::BTreeMap;
 
@@ -89,6 +89,52 @@ async fn adapter_rejects_ambiguous_timestamp_strings_before_oracle_execution() {
 }
 
 #[tokio::test]
+async fn adapter_accepts_structured_oracle_date_and_timestamp_binds() {
+    let connector = OracleConnector::for_test();
+    let mut session = connector
+        .open_for_test(&profile(), "test-secret")
+        .await
+        .unwrap();
+
+    let result = session
+        .execute_named(
+            "merge into relay_test using dual on (id = :ID) when matched then update set happened_on = :DATE_VALUE, happened_at = :TIMESTAMP_VALUE",
+            &[named_row([
+                ("ID", Value::Int(7)),
+                (
+                    "DATE_VALUE",
+                    Value::OracleDate(OracleDate {
+                        year: 2026,
+                        month: 8,
+                        day: 1,
+                        hour: 12,
+                        minute: 30,
+                        second: 0,
+                    }),
+                ),
+                (
+                    "TIMESTAMP_VALUE",
+                    Value::OracleTimestamp(OracleTimestamp {
+                        year: 2026,
+                        month: 8,
+                        day: 1,
+                        hour: 12,
+                        minute: 30,
+                        second: 0,
+                        microsecond: 123_456,
+                        tz_hour_offset: 0,
+                        tz_minute_offset: 0,
+                    }),
+                ),
+            ])],
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), 1);
+    assert_eq!(connector.test_bind_widths(), vec![3]);
+}
+
+#[tokio::test]
 async fn adapter_preserves_oracle_error_codes_and_masks_messages() {
     let connector = OracleConnector::for_test_with_failure(
         "ORA-00001",
@@ -136,16 +182,18 @@ async fn oracle_integration_named_merge_and_rollback() {
         .unwrap();
     session
         .execute_named(
-            &format!("CREATE TABLE {table} (id NUMBER PRIMARY KEY, label VARCHAR2(30))"),
+            &format!(
+                "CREATE TABLE {table} (id NUMBER PRIMARY KEY, label VARCHAR2(30), happened_on DATE, happened_at TIMESTAMP)"
+            ),
             std::slice::from_ref(&empty),
         )
         .await
         .unwrap();
 
     let merge = format!(
-        "MERGE INTO {table} target USING (SELECT :ID id, :LABEL label FROM dual) source \
-         ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET target.label = source.label \
-         WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label)"
+        "MERGE INTO {table} target USING (SELECT :ID id, :LABEL label, :HAPPENED_ON happened_on, :HAPPENED_AT happened_at FROM dual) source \
+         ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET target.label = source.label, target.happened_on = source.happened_on, target.happened_at = source.happened_at \
+         WHEN NOT MATCHED THEN INSERT (id, label, happened_on, happened_at) VALUES (source.id, source.label, source.happened_on, source.happened_at)"
     );
     session.begin().await.unwrap();
     session
@@ -154,6 +202,31 @@ async fn oracle_integration_named_merge_and_rollback() {
             &[named_row([
                 ("ID", Value::Int(1)),
                 ("LABEL", Value::Text("merged".into())),
+                (
+                    "HAPPENED_ON",
+                    Value::OracleDate(OracleDate {
+                        year: 2026,
+                        month: 8,
+                        day: 1,
+                        hour: 12,
+                        minute: 30,
+                        second: 0,
+                    }),
+                ),
+                (
+                    "HAPPENED_AT",
+                    Value::OracleTimestamp(OracleTimestamp {
+                        year: 2026,
+                        month: 8,
+                        day: 1,
+                        hour: 12,
+                        minute: 30,
+                        second: 0,
+                        microsecond: 123_456,
+                        tz_hour_offset: 0,
+                        tz_minute_offset: 0,
+                    }),
+                ),
             ])],
         )
         .await
@@ -161,12 +234,45 @@ async fn oracle_integration_named_merge_and_rollback() {
     session.commit().await.unwrap();
 
     let merged = session
-        .query(&format!("SELECT label FROM {table} WHERE id = 1"))
+        .query(&format!(
+            "SELECT label, happened_on, happened_at FROM {table} WHERE id = 1"
+        ))
         .await
         .unwrap();
     assert_eq!(
         merged.rows[0].normalized_index().unwrap().get("LABEL"),
         Some(&Value::Text("merged".into()))
+    );
+    assert_eq!(
+        merged.rows[0]
+            .normalized_index()
+            .unwrap()
+            .get("HAPPENED_ON"),
+        Some(&Value::OracleDate(OracleDate {
+            year: 2026,
+            month: 8,
+            day: 1,
+            hour: 12,
+            minute: 30,
+            second: 0,
+        }))
+    );
+    assert_eq!(
+        merged.rows[0]
+            .normalized_index()
+            .unwrap()
+            .get("HAPPENED_AT"),
+        Some(&Value::OracleTimestamp(OracleTimestamp {
+            year: 2026,
+            month: 8,
+            day: 1,
+            hour: 12,
+            minute: 30,
+            second: 0,
+            microsecond: 123_456,
+            tz_hour_offset: 0,
+            tz_minute_offset: 0,
+        }))
     );
 
     session.begin().await.unwrap();
@@ -176,6 +282,31 @@ async fn oracle_integration_named_merge_and_rollback() {
             &[named_row([
                 ("ID", Value::Int(2)),
                 ("LABEL", Value::Text("rolled back".into())),
+                (
+                    "HAPPENED_ON",
+                    Value::OracleDate(OracleDate {
+                        year: 2026,
+                        month: 8,
+                        day: 1,
+                        hour: 12,
+                        minute: 30,
+                        second: 0,
+                    }),
+                ),
+                (
+                    "HAPPENED_AT",
+                    Value::OracleTimestamp(OracleTimestamp {
+                        year: 2026,
+                        month: 8,
+                        day: 1,
+                        hour: 12,
+                        minute: 30,
+                        second: 0,
+                        microsecond: 123_456,
+                        tz_hour_offset: 0,
+                        tz_minute_offset: 0,
+                    }),
+                ),
             ])],
         )
         .await

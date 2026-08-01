@@ -12,8 +12,8 @@ use db_relay::{
         settings_service::SettingsService,
     },
     domain::{
-        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunState, RunStatus,
-        TransactionPolicy,
+        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
+        RunStatus, TransactionPolicy,
     },
     infrastructure::sqlite::SqliteStore,
 };
@@ -598,6 +598,110 @@ fn run_history_never_persists_an_untrusted_connector_code() {
 }
 
 #[test]
+fn bound_run_history_excludes_sql_and_connection_credentials() {
+    // Would fail if recovery configuration were serialized directly into the
+    // run-history document instead of a safe audit projection.
+    let store = SqliteStore::in_memory().unwrap();
+    let source = profile("source", "credential://history-source-secret");
+    let target = profile("target", "credential://history-target-secret");
+    store.save_connection(&source).unwrap();
+    store.save_connection(&target).unwrap();
+    let flow = flow_referencing("source", "target");
+    store.save_flow(&flow).unwrap();
+    let binding = RunBinding {
+        flow: flow.clone(),
+        source_profile: source,
+        target_profile: target,
+    };
+
+    store
+        .create_bound_run(
+            "safe-history-run",
+            &RunState::running(TransactionPolicy::AllOrNothing, 1),
+            &binding,
+        )
+        .unwrap();
+
+    let dump = store.run_history_json_for_test("safe-history-run").unwrap();
+
+    assert!(!dump.contains(&flow.query_steps[0].select_sql));
+    assert!(!dump.contains(&flow.query_steps[0].upsert_sql));
+    assert!(!dump.contains("history-source-secret"));
+    assert!(!dump.contains("history-target-secret"));
+}
+
+#[test]
+fn run_history_projects_safe_flow_metadata_timing_and_connector_detail() {
+    // Would fail if the history list discarded safe audit fields or replaced a
+    // sanitized Oracle diagnostic with a generic message.
+    let store = SqliteStore::in_memory().unwrap();
+    let source = profile("source", "credential://source");
+    let target = profile("target", "credential://target");
+    store.save_connection(&source).unwrap();
+    store.save_connection(&target).unwrap();
+    let flow = flow_referencing("source", "target");
+    store.save_flow(&flow).unwrap();
+    let binding = RunBinding {
+        flow: flow.clone(),
+        source_profile: source,
+        target_profile: target,
+    };
+    let mut state = RunState::running(TransactionPolicy::CommitSuccesses, 1);
+    state
+        .record_step_failure(
+            0,
+            RunError::connector_with_retryable("ORA-00001", "unique constraint violated", true),
+        )
+        .unwrap();
+
+    store
+        .create_bound_run("auditable-run", &state, &binding)
+        .unwrap();
+    store
+        .append_bound_run("auditable-run", &state, &binding)
+        .unwrap();
+    let entry = store.list_runs().unwrap().pop().unwrap();
+
+    assert_eq!(entry.flow_id.as_deref(), Some("daily-sync"));
+    assert_eq!(entry.flow_version, Some(3));
+    assert!(entry.started_at_ms > 0);
+    assert!(entry.ended_at_ms.is_none());
+    assert!(matches!(
+        entry.state.events(),
+        [RunEvent::StepFailed { error, .. }]
+            if error.history_code() == "ORA-00001"
+                && error.connector_message() == Some("unique constraint violated")
+                && error.retryable()
+    ));
+}
+
+#[test]
+fn preflight_history_keeps_flow_identity_without_serializing_a_recovery_binding() {
+    let store = SqliteStore::in_memory().unwrap();
+    let flow = flow_referencing("missing-source", "missing-target");
+    let state = RunState::from_history(
+        TransactionPolicy::AllOrNothing,
+        RunStatus::Failed,
+        vec![db_relay::domain::StepStatus::Failed],
+        vec![],
+    );
+
+    store
+        .create_run_for_flow("preflight-flow-audit", &state, &flow)
+        .unwrap();
+    let entry = store.list_runs().unwrap().pop().unwrap();
+    let json = store
+        .run_history_json_for_test("preflight-flow-audit")
+        .unwrap();
+
+    assert_eq!(entry.flow_id.as_deref(), Some("daily-sync"));
+    assert_eq!(entry.flow_version, Some(3));
+    assert!(entry.ended_at_ms.is_some());
+    assert!(!json.contains("select_sql"));
+    assert!(!json.contains("credential_ref"));
+}
+
+#[test]
 fn recovery_events_keep_each_decision_for_the_same_step() {
     let store = SqliteStore::in_memory().unwrap();
     let mut state = RunState::awaiting_recovery_after_step(1, 3).unwrap();
@@ -805,6 +909,41 @@ fn opening_a_legacy_stored_run_resanitizes_an_arbitrary_connector_code() {
 
     assert!(loaded.is_some());
     assert!(!dump.contains("legacy-stored-code-secret-fixture"));
+}
+
+#[test]
+fn opening_a_legacy_bound_run_rewrites_its_raw_configuration_as_safe_binding() {
+    let path = std::env::temp_dir().join(format!(
+        "db-relay-legacy-binding-{}-{}.sqlite",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            r#"
+            CREATE TABLE runs (id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL);
+            INSERT INTO runs VALUES ('legacy-bound-run',
+              '{"policy":"all_or_nothing","status":"completed","steps":[],"events":[],"binding":{"flow":{"id":"legacy-flow","name":"Legacy","source_connection_id":"source","target_connection_id":"target","query_steps":[{"id":"step","select_sql":"SELECT legacy_history_sql_secret FROM t","upsert_sql":"MERGE legacy_history_sql_secret"}],"transaction_policy":"all_or_nothing","version":7},"source_profile":{"id":"source","display_name":"source","kind":"oracle","host":"db.example","port":1521,"service_name":"XE","username":"relay","credential_ref":"credential://legacy-history-secret","enabled":true},"target_profile":{"id":"target","display_name":"target","kind":"oracle","host":"db.example","port":1521,"service_name":"XE","username":"relay","credential_ref":"credential://legacy-history-secret","enabled":true}}}');
+            "#,
+        )
+        .unwrap();
+    drop(legacy);
+
+    let store = SqliteStore::open(&path).unwrap();
+    let state_json = store.run_history_json_for_test("legacy-bound-run").unwrap();
+    let history = store.list_runs().unwrap();
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+
+    assert!(state_json.contains("legacy-flow"));
+    assert!(!state_json.contains("legacy_history_sql_secret"));
+    assert!(!state_json.contains("legacy-history-secret"));
+    assert_eq!(history[0].flow_id.as_deref(), Some("legacy-flow"));
+    assert_eq!(history[0].flow_version, Some(7));
 }
 
 #[cfg(feature = "test-support")]

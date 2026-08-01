@@ -1,6 +1,7 @@
 use std::{
     path::Path,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -29,7 +30,61 @@ struct StoredRun {
     steps: Vec<StepStatus>,
     events: Vec<StoredRunEvent>,
     #[serde(default)]
-    binding: Option<RunBinding>,
+    flow_id: Option<String>,
+    #[serde(default)]
+    flow_version: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_stored_binding")]
+    binding: Option<StoredRunBinding>,
+}
+
+/// Recovery needs to detect configuration drift, but run history must not
+/// retain query text, credential references, or connection details.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+struct StoredRunBinding {
+    flow_id: String,
+    flow_version: u64,
+    source_connection_id: String,
+    source_signature: String,
+    target_connection_id: String,
+    target_signature: String,
+}
+
+impl From<&RunBinding> for StoredRunBinding {
+    fn from(binding: &RunBinding) -> Self {
+        Self {
+            flow_id: binding.flow.id.clone(),
+            flow_version: binding.flow.version,
+            source_connection_id: binding.source_profile.id.clone(),
+            source_signature: connection_signature(&binding.source_profile),
+            target_connection_id: binding.target_profile.id.clone(),
+            target_signature: connection_signature(&binding.target_profile),
+        }
+    }
+}
+
+impl StoredRunBinding {
+    fn matches(&self, binding: &RunBinding) -> bool {
+        self == &Self::from(binding)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRunBindingWire {
+    Safe(StoredRunBinding),
+    Legacy(Box<RunBinding>),
+}
+
+fn deserialize_stored_binding<'de, D>(deserializer: D) -> Result<Option<StoredRunBinding>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<StoredRunBindingWire>::deserialize(deserializer).map(|binding| {
+        binding.map(|binding| match binding {
+            StoredRunBindingWire::Safe(binding) => binding,
+            StoredRunBindingWire::Legacy(binding) => StoredRunBinding::from(binding.as_ref()),
+        })
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -43,10 +98,14 @@ enum StoredRunEvent {
         step: usize,
         error_code: String,
         #[serde(default)]
+        error_message: String,
+        #[serde(default)]
         retryable: bool,
     },
     TransactionFailed {
         error_code: String,
+        #[serde(default)]
+        error_message: String,
         #[serde(default)]
         retryable: bool,
     },
@@ -71,6 +130,8 @@ impl StoredRun {
                 .iter()
                 .map(StoredRunEvent::from_run_event)
                 .collect(),
+            flow_id: None,
+            flow_version: None,
             binding: None,
         }
         .sanitize()
@@ -78,7 +139,16 @@ impl StoredRun {
 
     fn from_bound_state(state: &RunState, binding: &RunBinding) -> Self {
         let mut stored = Self::from_state(state);
-        stored.binding = Some(binding.clone());
+        stored.flow_id = Some(binding.flow.id.clone());
+        stored.flow_version = Some(binding.flow.version);
+        stored.binding = Some(StoredRunBinding::from(binding));
+        stored
+    }
+
+    fn from_state_for_flow(state: &RunState, flow: &Flow) -> Self {
+        let mut stored = Self::from_state(state);
+        stored.flow_id = Some(flow.id.clone());
+        stored.flow_version = Some(flow.version);
         stored
     }
 
@@ -91,11 +161,17 @@ impl StoredRun {
         RunState::from_history(self.policy, self.status, self.steps, events)
     }
 
-    fn binding(&self) -> Option<RunBinding> {
+    fn binding(&self) -> Option<StoredRunBinding> {
         self.binding.clone()
     }
 
     fn sanitize(mut self) -> Self {
+        if self.flow_id.is_none() {
+            if let Some(binding) = &self.binding {
+                self.flow_id = Some(binding.flow_id.clone());
+                self.flow_version = Some(binding.flow_version);
+            }
+        }
         if let RunStatus::InDoubt { reason, .. } = &mut self.status {
             **reason = RunError::connector(
                 reason.history_code(),
@@ -104,10 +180,19 @@ impl StoredRun {
         }
         for event in &mut self.events {
             match event {
-                StoredRunEvent::StepFailed { error_code, .. }
-                | StoredRunEvent::TransactionFailed { error_code, .. } => {
+                StoredRunEvent::StepFailed {
+                    error_code,
+                    error_message,
+                    ..
+                }
+                | StoredRunEvent::TransactionFailed {
+                    error_code,
+                    error_message,
+                    ..
+                } => {
                     *error_code =
                         RunError::connector(std::mem::take(error_code), "").history_code();
+                    *error_message = sanitize_history_message(error_message);
                 }
                 StoredRunEvent::StepSucceeded { .. } | StoredRunEvent::RecoveryApplied { .. } => {}
             }
@@ -146,10 +231,12 @@ impl StoredRunEvent {
             RunEvent::StepFailed { step, error } => Self::StepFailed {
                 step: *step,
                 error_code: error.history_code(),
+                error_message: safe_history_message(error),
                 retryable: error.retryable(),
             },
             RunEvent::TransactionFailed { error } => Self::TransactionFailed {
                 error_code: error.history_code(),
+                error_message: safe_history_message(error),
                 retryable: error.retryable(),
             },
             RunEvent::RecoveryApplied { step, action } => Self::RecoveryApplied {
@@ -171,22 +258,24 @@ impl StoredRunEvent {
             Self::StepFailed {
                 step,
                 error_code,
+                error_message,
                 retryable,
             } => RunEvent::StepFailed {
                 step,
                 error: RunError::connector_with_retryable(
                     error_code,
-                    "sanitized persisted run error",
+                    sanitize_history_message(&error_message),
                     retryable,
                 ),
             },
             Self::TransactionFailed {
                 error_code,
+                error_message,
                 retryable,
             } => RunEvent::TransactionFailed {
                 error: RunError::connector_with_retryable(
                     error_code,
-                    "sanitized persisted run error",
+                    sanitize_history_message(&error_message),
                     retryable,
                 ),
             },
@@ -239,7 +328,9 @@ impl SqliteStore {
                 );
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY NOT NULL,
-                    state_json TEXT NOT NULL
+                    state_json TEXT NOT NULL,
+                    started_at_ms INTEGER NOT NULL DEFAULT 0,
+                    ended_at_ms INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS run_steps (
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -258,6 +349,7 @@ impl SqliteStore {
         )
             .map_err(sqlite_error)?;
         migrate_legacy_schema(&mut connection).map_err(sqlite_error)?;
+        migrate_run_history_columns(&mut connection).map_err(sqlite_error)?;
         migrate_legacy_run_history(&mut connection).map_err(sqlite_error)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -484,6 +576,15 @@ impl SqliteStore {
         self.create_stored_run(run_id, state, StoredRun::from_state(state))
     }
 
+    pub fn create_run_for_flow(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        flow: &Flow,
+    ) -> Result<(), PortError> {
+        self.create_stored_run(run_id, state, StoredRun::from_state_for_flow(state, flow))
+    }
+
     pub fn create_bound_run(
         &self,
         run_id: &str,
@@ -612,7 +713,9 @@ impl SqliteStore {
                     current_state.status(),
                     RunStatus::AwaitingRecovery { .. } | RunStatus::RecoveryPending { .. }
                 )
-                || current_binding.as_ref() != Some(expected_binding)
+                || !current_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.matches(expected_binding))
             {
                 return Ok(BoundRecoveryApply::RecoveryNoLongerAvailable);
             }
@@ -697,20 +800,27 @@ impl SqliteStore {
     }
 
     pub fn list_runs(&self) -> Result<Vec<RunHistoryEntry>, PortError> {
-        let runs: Vec<(String, String)> = self.with_connection(|connection| {
-            let mut statement =
-                connection.prepare("SELECT id, state_json FROM runs ORDER BY id DESC")?;
+        let runs: Vec<(String, String, u64, Option<u64>)> = self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, state_json, started_at_ms, ended_at_ms FROM runs ORDER BY id DESC",
+            )?;
             let runs = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
                 .collect();
             runs
         })?;
 
         runs.into_iter()
-            .map(|(run_id, state_json)| {
+            .map(|(run_id, state_json, started_at_ms, ended_at_ms)| {
                 serde_json::from_str::<StoredRun>(&state_json)
                     .map(|stored| RunHistoryEntry {
                         run_id,
+                        flow_id: stored.flow_id.clone(),
+                        flow_version: stored.flow_version,
+                        started_at_ms,
+                        ended_at_ms,
                         state: stored.into_state(),
                     })
                     .map_err(|_| {
@@ -721,25 +831,45 @@ impl SqliteStore {
     }
 
     pub fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError> {
-        let state_json: Option<String> = self.with_connection(|connection| {
-            connection
+        self.with_connection_port(|connection| {
+            let state_json: Option<String> = connection
                 .query_row(
                     "SELECT state_json FROM runs WHERE id = ?1",
                     [run_id],
-                    |row| row.get::<_, String>(0),
+                    |row| row.get(0),
                 )
                 .optional()
-        })?;
-        state_json
-            .map(|json| {
-                serde_json::from_str::<StoredRun>(&json)
-                    .map(|stored| stored.binding())
-                    .map_err(|_| {
-                        PortError::new("HISTORY_DESERIALIZATION", "run history could not be loaded")
-                    })
-            })
-            .transpose()
-            .map(Option::flatten)
+                .map_err(sqlite_error)?;
+            let Some(state_json) = state_json else {
+                return Ok(None);
+            };
+            let binding = serde_json::from_str::<StoredRun>(&state_json)
+                .map_err(|_| {
+                    PortError::new("HISTORY_DESERIALIZATION", "run history could not be loaded")
+                })?
+                .binding();
+            let Some(binding) = binding else {
+                return Ok(None);
+            };
+            let flow =
+                load_flow_from_connection(connection, &binding.flow_id).map_err(sqlite_error)?;
+            let source_profile =
+                load_connection_from_connection(connection, &binding.source_connection_id)
+                    .map_err(sqlite_error)?;
+            let target_profile =
+                load_connection_from_connection(connection, &binding.target_connection_id)
+                    .map_err(sqlite_error)?;
+            let (Some(source_profile), Some(target_profile)) = (source_profile, target_profile)
+            else {
+                return Ok(None);
+            };
+            let current = RunBinding {
+                flow,
+                source_profile,
+                target_profile,
+            };
+            Ok(binding.matches(&current).then_some(current))
+        })
     }
 
     #[doc(hidden)]
@@ -783,6 +913,21 @@ impl SqliteStore {
             Ok(output)
         })
         .unwrap_or_default()
+    }
+
+    #[doc(hidden)]
+    pub fn run_history_json_for_test(&self, run_id: &str) -> Option<String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT state_json FROM runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
     }
 
     fn load_connection_optional(
@@ -886,6 +1031,15 @@ impl HistoryRepository for SqliteStore {
         SqliteStore::create_run(self, run_id, state)
     }
 
+    async fn create_run_for_flow(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        flow: &Flow,
+    ) -> Result<(), PortError> {
+        SqliteStore::create_run_for_flow(self, run_id, state, flow)
+    }
+
     async fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
         SqliteStore::append_run(self, run_id, state)
     }
@@ -951,14 +1105,31 @@ fn write_stored_run(
 ) -> rusqlite::Result<()> {
     if insert_only {
         transaction.execute(
-            "INSERT INTO runs (id, state_json) VALUES (?1, ?2)",
-            params![run_id, state_json],
+            "INSERT INTO runs (id, state_json, started_at_ms, ended_at_ms)
+             VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN ?3 ELSE NULL END)",
+            params![
+                run_id,
+                state_json,
+                now_unix_ms(),
+                is_terminal_run(state.status())
+            ],
         )?;
     } else {
         transaction.execute(
-            "INSERT INTO runs (id, state_json) VALUES (?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json",
-            params![run_id, state_json],
+            "INSERT INTO runs (id, state_json, started_at_ms, ended_at_ms)
+             VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN ?3 ELSE NULL END)
+             ON CONFLICT(id) DO UPDATE SET
+               state_json = excluded.state_json,
+               ended_at_ms = CASE
+                 WHEN runs.ended_at_ms IS NULL AND ?4 THEN ?3
+                 ELSE runs.ended_at_ms
+               END",
+            params![
+                run_id,
+                state_json,
+                now_unix_ms(),
+                is_terminal_run(state.status())
+            ],
         )?;
     }
     transaction.execute("DELETE FROM run_steps WHERE run_id = ?1", [run_id])?;
@@ -1126,8 +1297,103 @@ fn recovery_action(action: RecoveryAction) -> &'static str {
     }
 }
 
+fn connection_signature(profile: &ConnectionProfile) -> String {
+    // Stable FNV-1a is used only as an equality fingerprint for recovery;
+    // it is never presented as authentication or persisted source metadata.
+    let material = format!(
+        "{:?}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        profile.kind,
+        profile.host,
+        profile.port,
+        profile.service_name,
+        profile.username,
+        profile.enabled
+    );
+    let hash = material
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("{hash:016x}")
+}
+
+fn safe_history_message(error: &RunError) -> String {
+    error
+        .connector_message()
+        .map(sanitize_history_message)
+        .unwrap_or_else(|| "sanitized persisted run error".into())
+}
+
+fn sanitize_history_message(message: &str) -> String {
+    let message = crate::domain::mask_sensitive_text(message);
+    let lower = message.to_ascii_lowercase();
+    let unsafe_content = [
+        "select",
+        "insert",
+        "update",
+        "delete",
+        "merge",
+        "begin",
+        "declare",
+        "password",
+        "secret",
+        "token",
+        "credential",
+        "bind",
+        "row",
+        ":",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if message.is_empty()
+        || unsafe_content
+        || message.len() > 512
+        || !message
+            .chars()
+            .all(|character| character.is_ascii_graphic() || character == ' ')
+    {
+        "sanitized persisted run error".into()
+    } else {
+        message
+    }
+}
+
 fn sqlite_error(_error: rusqlite::Error) -> PortError {
     PortError::new("SQLITE", "local metadata storage failed")
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn is_terminal_run(status: RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Completed
+            | RunStatus::RolledBack
+            | RunStatus::StoppedByUser
+            | RunStatus::Failed
+            | RunStatus::InDoubt { .. }
+    )
+}
+
+fn migrate_run_history_columns(connection: &mut Connection) -> rusqlite::Result<()> {
+    if !table_has_column(connection, "runs", "started_at_ms")? {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN started_at_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "runs", "ended_at_ms")? {
+        connection.execute("ALTER TABLE runs ADD COLUMN ended_at_ms INTEGER", [])?;
+    }
+    Ok(())
 }
 
 fn migrate_legacy_schema(connection: &mut Connection) -> rusqlite::Result<()> {
@@ -1239,6 +1505,8 @@ fn migrate_legacy_run_history(connection: &mut Connection) -> rusqlite::Result<(
                 status: RunStatus::Failed,
                 steps: Vec::new(),
                 events: Vec::new(),
+                flow_id: None,
+                flow_version: None,
                 binding: None,
             })
             .sanitize()

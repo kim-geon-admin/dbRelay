@@ -6,7 +6,8 @@ use oracle_rs::{BatchBinds, Config, Connection};
 use crate::{
     application::ports::{DatabaseConnectorFactory, DatabaseSession, PortError, ResolvedSecret},
     domain::{
-        extract_named_bind_occurrences, ConnectionProfile, DbKind, NamedRow, Row, RowSet, Value,
+        extract_named_bind_occurrences, ConnectionProfile, DbKind, NamedRow, OracleDate,
+        OracleTimestamp, Row, RowSet, Value,
     },
 };
 
@@ -218,6 +219,8 @@ enum DriverValue {
     Int(i64),
     Decimal(String),
     Bool(bool),
+    Date(OracleDate),
+    Timestamp(OracleTimestamp),
     Bytes(Vec<u8>),
 }
 
@@ -234,6 +237,16 @@ impl TryFrom<&Value> for DriverValue {
             Value::Timestamp(_) => Err(PortError::new(
                 "BIND_TYPE_UNSUPPORTED",
                 "timestamp values require a structured timestamp representation",
+            )),
+            Value::OracleDate(value) => Ok(Self::Date(*value)),
+            Value::OracleTimestamp(value)
+                if value.tz_hour_offset == 0 && value.tz_minute_offset == 0 =>
+            {
+                Ok(Self::Timestamp(*value))
+            }
+            Value::OracleTimestamp(_) => Err(PortError::new(
+                "BIND_TYPE_UNSUPPORTED",
+                "timestamp with timezone values are unsupported by the Oracle batch driver",
             )),
             Value::Bytes(value) => Ok(Self::Bytes(value.clone())),
         }
@@ -329,6 +342,16 @@ impl OracleDriverSession for OracleRsSession {
             .iter()
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
+        let unsupported_bind_columns = result
+            .columns
+            .iter()
+            .filter_map(|column| match column.oracle_type {
+                oracle_rs::OracleType::TimestampTz | oracle_rs::OracleType::TimestampLtz => {
+                    Some(column.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
         let rows = result
             .rows
             .into_iter()
@@ -352,6 +375,7 @@ impl OracleDriverSession for OracleRsSession {
             .collect();
         Ok(RowSet {
             columns: names,
+            unsupported_bind_columns,
             rows,
         })
     }
@@ -410,6 +434,25 @@ fn oracle_value(value: DriverValue) -> oracle_rs::Value {
         }
         DriverValue::Int(value) => oracle_rs::Value::Integer(value),
         DriverValue::Bool(value) => oracle_rs::Value::Boolean(value),
+        DriverValue::Date(value) => oracle_rs::Value::Date(oracle_rs::types::OracleDate::new(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+        )),
+        DriverValue::Timestamp(value) => {
+            oracle_rs::Value::Timestamp(oracle_rs::types::OracleTimestamp::new(
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.microsecond,
+            ))
+        }
         DriverValue::Bytes(value) => oracle_rs::Value::Bytes(value),
     }
 }
@@ -423,9 +466,25 @@ fn domain_value(value: oracle_rs::Value) -> Value {
         oracle_rs::Value::Float(value) => Value::Decimal(value.to_string()),
         oracle_rs::Value::Number(value) => Value::Decimal(value.as_str().to_owned()),
         oracle_rs::Value::Boolean(value) => Value::Bool(value),
-        oracle_rs::Value::Timestamp(value) => {
-            Value::Timestamp(oracle_rs::Value::Timestamp(value).to_string())
-        }
+        oracle_rs::Value::Date(value) => Value::OracleDate(OracleDate {
+            year: value.year,
+            month: value.month,
+            day: value.day,
+            hour: value.hour,
+            minute: value.minute,
+            second: value.second,
+        }),
+        oracle_rs::Value::Timestamp(value) => Value::OracleTimestamp(OracleTimestamp {
+            year: value.year,
+            month: value.month,
+            day: value.day,
+            hour: value.hour,
+            minute: value.minute,
+            second: value.second,
+            microsecond: value.microsecond,
+            tz_hour_offset: value.tz_hour_offset,
+            tz_minute_offset: value.tz_minute_offset,
+        }),
         other => Value::Text(other.to_string()),
     }
 }

@@ -9,6 +9,10 @@ use super::{ApplicationContainer, CommandErrorDto};
 #[serde(rename_all = "camelCase")]
 pub struct RunHistoryResponse {
     pub run_id: String,
+    pub flow_id: String,
+    pub flow_version: u64,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
     pub policy: TransactionPolicy,
     pub status: RunStatus,
     pub steps: Vec<StepStatus>,
@@ -27,6 +31,10 @@ pub async fn list_run_history(
             runs.into_iter()
                 .map(|run| RunHistoryResponse {
                     run_id: run.run_id,
+                    flow_id: run.flow_id.unwrap_or_default(),
+                    flow_version: run.flow_version.unwrap_or_default(),
+                    started_at: run.started_at_ms,
+                    ended_at: run.ended_at_ms,
                     policy: run.state.policy(),
                     status: run.state.status(),
                     steps: run

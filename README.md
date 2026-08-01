@@ -25,7 +25,9 @@ pnpm tauri build
 
 ## Credentials and local data
 
-Connection metadata and flow definitions are stored locally in SQLite. Passwords and tokens are stored separately in Windows Credential Manager under the stable connection ID; SQLite stores only the credential reference. Credentials, bind values, and source rows are never returned by the command API or recorded in run history.
+Connection metadata and flow definitions are stored locally in SQLite. Passwords and tokens are stored separately in Windows Credential Manager under the stable connection ID; SQLite stores only the credential reference. Credentials, SQL text, bind values, and source rows are never returned by the command API or recorded in run history. History instead records the flow ID/version, start/end timestamps, transaction policy, step statuses, recovery decisions, and sanitized connector code/message/retry metadata.
+
+Oracle `DATE` and timezone-free `TIMESTAMP` source values are carried as typed Oracle binds. Ambiguous textual timestamps and timestamps with an offset are rejected during preflight before a target transaction opens; `oracle-rs` 0.1.7 batch binding does not preserve the latter's timezone representation.
 
 ## Verification
 

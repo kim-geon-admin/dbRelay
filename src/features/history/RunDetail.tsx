@@ -13,5 +13,5 @@ function connectorDetail(error: Extract<HistoryRun["events"][number], { type: "s
 }
 
 export function RunDetail({ run }: { run: HistoryRun }) {
-  return <article className="history-detail" aria-label={`Run ${run.runId}`}><h2>{run.runId}</h2><p>Status: {statusKind(run.status).replace(/_/g, " ")}</p><p>Policy: {run.policy.replace(/_/g, " ")}</p><ol>{run.steps.map((step, index) => <li key={index}>Step {index + 1}: {stepKind(step).replace(/_/g, " ")}{affectedRows(step) ? ` (${affectedRows(step)} rows)` : ""}</li>)}</ol><h3>Recovery events</h3><ul>{run.events.map((event, index) => <li key={index}>{eventLabel(event)}</li>)}</ul></article>;
+  return <article className="history-detail" aria-label={`Run ${run.runId}`}><h2>{run.runId}</h2><p>Flow: {run.flowId} v{run.flowVersion}</p><p>Started: {new Date(run.startedAt).toISOString()}</p><p>Ended: {run.endedAt === null ? "In progress" : new Date(run.endedAt).toISOString()}</p><p>Status: {statusKind(run.status).replace(/_/g, " ")}</p><p>Policy: {run.policy.replace(/_/g, " ")}</p><ol>{run.steps.map((step, index) => <li key={index}>Step {index + 1}: {stepKind(step).replace(/_/g, " ")}{affectedRows(step) ? ` (${affectedRows(step)} rows)` : ""}</li>)}</ol><h3>Recovery events</h3><ul>{run.events.map((event, index) => <li key={index}>{eventLabel(event)}</li>)}</ul></article>;
 }

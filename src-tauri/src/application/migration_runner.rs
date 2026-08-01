@@ -316,14 +316,23 @@ impl<
             }
         };
 
+        let mut prepared_batches = Vec::with_capacity(flow.query_steps.len());
         for (step_index, step) in flow.query_steps.iter().enumerate() {
-            if let Err(error) = self
+            match self
                 .preflight_step(&mut source, target_profile.kind, step)
                 .await
             {
-                return self
-                    .persist_existing_preflight_failure(&run_id, initial_state, step_index, error)
-                    .await;
+                Ok(batch) => prepared_batches.push(batch),
+                Err(error) => {
+                    return self
+                        .persist_existing_preflight_failure(
+                            &run_id,
+                            initial_state,
+                            step_index,
+                            error,
+                        )
+                        .await
+                }
             }
         }
 
@@ -336,6 +345,7 @@ impl<
                     initial_state,
                     &mut source,
                     &mut target,
+                    Some(&prepared_batches),
                 )
                 .await;
         }
@@ -347,56 +357,23 @@ impl<
         }
 
         let mut state = initial_state;
-        for (step_index, step) in flow.query_steps.iter().enumerate() {
-            let failure = match source.query(&step.select_sql).await {
-                Ok(rows) => {
-                    if let Err(error) = validate_step_policy(target_profile.kind, step) {
-                        return self
-                            .rollback_after_failure(&run_id, &mut target, state, step_index, error)
-                            .await;
-                    }
-                    let binds = match extract_named_binds(&step.upsert_sql) {
-                        Ok(binds) => binds,
-                        Err(_) => {
-                            return self
-                                .rollback_after_failure(
-                                    &run_id,
-                                    &mut target,
-                                    state,
-                                    step_index,
-                                    RunError::connector(
-                                        "MAPPING_INVALID",
-                                        "target bind syntax could not be validated",
-                                    ),
-                                )
-                                .await
-                        }
-                    };
-                    match rows
-                        .rows
-                        .iter()
-                        .map(|row| map_row(row, &binds))
-                        .collect::<Result<Vec<_>, _>>()
-                    {
-                        Ok(batch) => match target.execute_named(&step.upsert_sql, &batch).await {
-                            Ok(affected_rows) => {
-                                state
-                                    .record_step_success(step_index, affected_rows)
-                                    .map_err(|_| {
-                                        StartRunError::new(
-                                            "RUN_STATE_INVALID",
-                                            "run state could not record a successful step",
-                                        )
-                                    })?;
-                                None
-                            }
-                            Err(error) => Some(run_error(error)),
-                        },
-                        Err(_) => Some(RunError::connector(
-                            "MAPPING_INVALID",
-                            "source columns do not satisfy target bind parameters",
-                        )),
-                    }
+        for (step_index, (step, batch)) in flow
+            .query_steps
+            .iter()
+            .zip(prepared_batches.iter())
+            .enumerate()
+        {
+            let failure = match target.execute_named(&step.upsert_sql, batch).await {
+                Ok(affected_rows) => {
+                    state
+                        .record_step_success(step_index, affected_rows)
+                        .map_err(|_| {
+                            StartRunError::new(
+                                "RUN_STATE_INVALID",
+                                "run state could not record a successful step",
+                            )
+                        })?;
+                    None
                 }
                 Err(error) => Some(run_error(error)),
             };
@@ -558,6 +535,7 @@ impl<
                     state,
                     &mut source,
                     &mut target,
+                    None,
                 )
                 .await
                 .map_err(RecoveryError::from)
@@ -632,6 +610,7 @@ impl<
                     state,
                     &mut source,
                     &mut target,
+                    None,
                 )
                 .await
                 .map_err(RecoveryError::from)
@@ -639,6 +618,7 @@ impl<
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Runtime sessions and optional preflight batches stay explicit at this safety boundary.
     async fn execute_committed_steps(
         &self,
         run_id: &str,
@@ -647,6 +627,7 @@ impl<
         mut state: RunState,
         source: &mut Box<dyn DatabaseSession>,
         target: &mut Box<dyn DatabaseSession>,
+        prepared_batches: Option<&[Vec<crate::domain::NamedRow>]>,
     ) -> Result<RunSnapshot, StartRunError> {
         let start_step = match state.status() {
             RunStatus::Running { step } => step,
@@ -670,7 +651,13 @@ impl<
                 })?;
                 return self.persist_bound(run_id, &state, binding).await;
             }
-            let batch = match self.prepare_step_batch(source, step).await {
+            let batch = match if let Some(batch) =
+                prepared_batches.and_then(|batches| batches.get(step_index).cloned())
+            {
+                Ok(batch)
+            } else {
+                self.prepare_step_batch(source, step).await
+            } {
                 Ok(batch) => batch,
                 Err(error) => {
                     state.record_step_failure(step_index, error).map_err(|_| {
@@ -682,6 +669,17 @@ impl<
                     return self.persist_bound(run_id, &state, binding).await;
                 }
             };
+            if let Err(error) =
+                validate_target_batch_capabilities(binding.target_profile.kind, &batch)
+            {
+                state.record_step_failure(step_index, error).map_err(|_| {
+                    StartRunError::new(
+                        "RUN_STATE_INVALID",
+                        "run state could not record a failed step",
+                    )
+                })?;
+                return self.persist_bound(run_id, &state, binding).await;
+            }
             if let Err(error) = target.begin().await {
                 return self
                     .rollback_committed_failure(
@@ -791,6 +789,22 @@ impl<
         step: &crate::domain::QueryStep,
     ) -> Result<Vec<crate::domain::NamedRow>, RunError> {
         let rows = source.query(&step.select_sql).await.map_err(run_error)?;
+        let binds = extract_named_binds(&step.upsert_sql).map_err(|_| {
+            RunError::connector(
+                "MAPPING_INVALID",
+                "target bind syntax could not be validated",
+            )
+        })?;
+        if rows
+            .unsupported_bind_columns
+            .iter()
+            .any(|column| binds.iter().any(|bind| bind.eq_ignore_ascii_case(column)))
+        {
+            return Err(RunError::connector(
+                "BIND_TYPE_UNSUPPORTED",
+                "source column type is unsupported by the target bind capability",
+            ));
+        }
         map_batch(&rows, &step.upsert_sql)
     }
 
@@ -799,9 +813,11 @@ impl<
         source: &mut Box<dyn DatabaseSession>,
         target_kind: DbKind,
         step: &crate::domain::QueryStep,
-    ) -> Result<(), RunError> {
+    ) -> Result<Vec<crate::domain::NamedRow>, RunError> {
         validate_step_policy(target_kind, step)?;
-        self.prepare_step_batch(source, step).await.map(|_| ())
+        let batch = self.prepare_step_batch(source, step).await?;
+        validate_target_batch_capabilities(target_kind, &batch)?;
+        Ok(batch)
     }
 
     async fn ensure_recovery_binding(&self, binding: &RunBinding) -> Result<(), RecoveryError> {
@@ -962,7 +978,7 @@ impl<
         };
         let state =
             RunState::from_history(flow.transaction_policy, RunStatus::Failed, steps, events);
-        self.create(run_id, &state).await
+        self.create_for_flow(run_id, &state, flow).await
     }
 
     async fn persist_existing_preflight_failure(
@@ -986,9 +1002,14 @@ impl<
         self.persist(run_id, &state).await
     }
 
-    async fn create(&self, run_id: &str, state: &RunState) -> Result<RunSnapshot, StartRunError> {
+    async fn create_for_flow(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        flow: &Flow,
+    ) -> Result<RunSnapshot, StartRunError> {
         self.history
-            .create_run(run_id, state)
+            .create_run_for_flow(run_id, state, flow)
             .await
             .map_err(StartRunError::from_port)?;
         Ok(RunSnapshot::from_state(run_id.into(), state))
@@ -1094,6 +1115,30 @@ fn map_batch(
                 "source columns do not satisfy target bind parameters",
             )
         })
+}
+
+fn validate_target_batch_capabilities(
+    kind: DbKind,
+    batch: &[crate::domain::NamedRow],
+) -> Result<(), RunError> {
+    if kind == DbKind::Oracle
+        && batch
+            .iter()
+            .flat_map(|row| row.values())
+            .any(|value| match value {
+                crate::domain::Value::Timestamp(_) => true,
+                crate::domain::Value::OracleTimestamp(value) => {
+                    value.tz_hour_offset != 0 || value.tz_minute_offset != 0
+                }
+                _ => false,
+            })
+    {
+        return Err(RunError::connector(
+            "BIND_TYPE_UNSUPPORTED",
+            "source timestamp values are not supported by the target bind capability",
+        ));
+    }
+    Ok(())
 }
 
 fn recovery_state_error(error: RunError) -> RecoveryError {

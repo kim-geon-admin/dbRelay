@@ -1,3 +1,3 @@
-import type { RunDto } from "../../lib/tauri";
+import type { HistoryRunDto } from "../../lib/tauri";
 
-export type HistoryRun = RunDto;
+export type HistoryRun = HistoryRunDto;

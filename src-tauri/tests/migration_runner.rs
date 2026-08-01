@@ -222,6 +222,72 @@ async fn numeric_target_bind_blocks_execution_before_target_begin() {
 }
 
 #[tokio::test]
+async fn ambiguous_timestamp_bind_is_rejected_during_preflight_before_target_begin() {
+    // Would fail if temporal conversion remained deferred to Oracle DML after
+    // the target transaction has started.
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(
+            0,
+            RowSet::single([("ID", Value::Timestamp("2026-08-01 12:30:00".into()))]),
+        )
+        .source_rows_for_step(1, rows_for_address());
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(harness.target_operations(), Vec::<String>::new());
+    assert!(matches!(
+        result.events.as_slice(),
+        [RunEvent::StepFailed { error, .. }]
+            if error.history_code() == "CONNECTOR_ERROR"
+    ));
+}
+
+#[tokio::test]
+async fn timezone_timestamp_metadata_is_rejected_during_preflight_before_target_begin() {
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(
+            0,
+            RowSet {
+                columns: vec!["ID".into()],
+                unsupported_bind_columns: vec!["ID".into()],
+                rows: vec![],
+            },
+        )
+        .source_rows_for_step(1, rows_for_address());
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(harness.target_operations(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn timezone_timestamp_metadata_on_an_unbound_source_column_is_allowed() {
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(
+            0,
+            RowSet {
+                columns: vec!["ID".into(), "AUDIT_TSTZ".into()],
+                unsupported_bind_columns: vec!["AUDIT_TSTZ".into()],
+                rows: vec![db_relay::domain::Row::from([
+                    ("ID", Value::Int(1)),
+                    ("AUDIT_TSTZ", Value::Text("not bound".into())),
+                ])],
+            },
+        )
+        .source_rows_for_step(1, rows_for_address());
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Completed);
+    assert_eq!(
+        harness.target_operations(),
+        ["begin", "execute:0", "execute:1", "commit"]
+    );
+}
+
+#[tokio::test]
 async fn successful_all_or_nothing_run_commits_target_once() {
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
         .source_rows_for_step(0, rows_for_customer())
@@ -400,9 +466,37 @@ async fn recovery_rechecks_changed_zero_row_metadata_before_opening_a_target_tra
     let paused = harness.runner.start(&harness.flow_id).await.unwrap();
     let operations_before_recovery = harness.target_operations();
 
-    // Query 4 is the recovery preflight; query 5 is the execution read that
-    // must still be prepared before `begin`.
-    harness.source_rows_for_query(5, RowSet::default());
+    // Query 2 is the edited-step recovery preflight. A missing zero-row
+    // column must return to recovery without opening a target transaction.
+    harness.source_rows_for_query(2, RowSet::default());
+    let run = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::EditAndRetry {
+                step_id: "address".into(),
+                select_sql: "select address_id from address".into(),
+                upsert_sql: "merge address using dual on (address_id = :ADDRESS_ID)".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.status, RunStatus::AwaitingRecovery { failed_step: 1 });
+    assert_eq!(harness.target_operations(), operations_before_recovery);
+}
+
+#[tokio::test]
+async fn recovery_validates_the_fresh_execution_batch_before_target_begin() {
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    let operations_before_recovery = harness.target_operations();
+    harness.source_rows_for_query(
+        3,
+        RowSet::single([("ADDRESS_ID", Value::Timestamp("ambiguous".into()))]),
+    );
+
     let run = harness
         .runner
         .recover(
@@ -606,7 +700,7 @@ async fn stop_preserves_committed_steps_and_does_not_execute_later_steps() {
 }
 
 #[tokio::test]
-async fn source_query_failure_after_preflight_rolls_back_target() {
+async fn all_or_nothing_reuses_the_preflight_batch_before_opening_the_target_transaction() {
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
         .source_rows_for_step(0, rows_for_customer())
         .source_rows_for_step(1, rows_for_address())
@@ -614,8 +708,11 @@ async fn source_query_failure_after_preflight_rolls_back_target() {
 
     let result = harness.runner.start(&harness.flow_id).await.unwrap();
 
-    assert_eq!(result.status, RunStatus::RolledBack);
-    assert_eq!(harness.target_operations(), ["begin", "rollback"]);
+    assert_eq!(result.status, RunStatus::Completed);
+    assert_eq!(
+        harness.target_operations(),
+        ["begin", "execute:0", "execute:1", "commit"]
+    );
 }
 
 #[tokio::test]

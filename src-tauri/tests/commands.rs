@@ -66,6 +66,10 @@ fn connection_response_never_serializes_credential_material() {
 fn run_history_response_never_serializes_execution_data() {
     let response = RunHistoryResponse {
         run_id: "migration-42".into(),
+        flow_id: "customer-relay".into(),
+        flow_version: 3,
+        started_at: 1,
+        ended_at: Some(2),
         policy: TransactionPolicy::CommitSuccesses,
         status: RunStatus::Completed,
         steps: vec![StepStatus::Succeeded { affected_rows: 3 }],

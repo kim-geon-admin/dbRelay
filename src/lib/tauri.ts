@@ -30,6 +30,9 @@ export type RunDto = {
   runId: string; policy: "all_or_nothing" | "commit_successes"; status: RunStatusDto;
   steps: StepStatusDto[]; events: RunEventDto[];
 };
+export type HistoryRunDto = RunDto & {
+  flowId: string; flowVersion: number; startedAt: number; endedAt: number | null;
+};
 type RecoverRunRequestDto =
   | { type: "edit_and_retry"; run_id: string; step_id: string; select_sql: string; upsert_sql: string }
   | { type: "skip_and_continue"; run_id: string; step_id: string }
@@ -60,7 +63,7 @@ type CommandResponseMap = {
   duplicate_flow: FlowDto;
   start_run: RunDto;
   recover_run: RunDto;
-  list_run_history: RunDto[];
+  list_run_history: HistoryRunDto[];
 };
 
 export function invokeCommand<TCommand extends keyof CommandRequestMap>(

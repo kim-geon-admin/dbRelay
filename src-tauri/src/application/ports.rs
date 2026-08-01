@@ -20,6 +20,10 @@ pub struct RunBinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunHistoryEntry {
     pub run_id: String,
+    pub flow_id: Option<String>,
+    pub flow_version: Option<u64>,
+    pub started_at_ms: u64,
+    pub ended_at_ms: Option<u64>,
     pub state: RunState,
 }
 
@@ -189,6 +193,15 @@ pub trait HistoryRepository: Send + Sync {
     /// must reject an existing ID rather than overwriting its history.
     async fn create_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
         self.append_run(run_id, state).await
+    }
+    /// Creates an initial preflight record with the safe flow audit identity.
+    async fn create_run_for_flow(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        _flow: &Flow,
+    ) -> Result<(), PortError> {
+        self.create_run(run_id, state).await
     }
     async fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError>;
     async fn load_run(&self, run_id: &str) -> Result<Option<RunState>, PortError>;
