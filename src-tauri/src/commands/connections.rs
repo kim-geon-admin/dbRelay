@@ -234,8 +234,8 @@ impl ConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: self.id.clone(),
-            credential_storage: CredentialStorage::Keyring,
-            plaintext_password: None,
+            credential_storage: CredentialStorage::Plaintext,
+            plaintext_password: Some(self.secret.clone()),
             enabled: true,
             source_read_only: self.source_read_only,
         })
@@ -261,8 +261,8 @@ impl UpdateConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: String::new(),
-            credential_storage: CredentialStorage::Keyring,
-            plaintext_password: None,
+            credential_storage: CredentialStorage::Plaintext,
+            plaintext_password: self.replacement_secret.clone(),
             enabled: self.enabled,
             source_read_only: self.source_read_only,
         })
@@ -308,4 +308,29 @@ fn validate_secret(secret: &str) -> Result<(), CommandErrorDto> {
         return Err(CommandErrorDto::validation("credential is required"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_connection_profiles_store_the_supplied_password_as_plaintext() {
+        let request = ConnectionRequest {
+            id: "production".into(),
+            display_name: "Production".into(),
+            kind: DbKind::Oracle,
+            host: "db.example.test".into(),
+            port: 1521,
+            service_name: "ORCLPDB1".into(),
+            username: "relay".into(),
+            source_read_only: false,
+            secret: "plain-secret".into(),
+        };
+
+        let profile = request.new_profile().unwrap();
+
+        assert_eq!(profile.credential_storage, CredentialStorage::Plaintext);
+        assert_eq!(profile.plaintext_password.as_deref(), Some("plain-secret"));
+    }
 }

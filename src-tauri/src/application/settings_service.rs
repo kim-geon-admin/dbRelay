@@ -66,6 +66,12 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
                 self.repository.update_connection(&updated).await
             }
             (CredentialStorage::Keyring, CredentialStorage::Plaintext) => {
+                if replacement.is_none() {
+                    updated.credential_ref = existing.credential_ref;
+                    updated.credential_storage = CredentialStorage::Keyring;
+                    updated.plaintext_password = None;
+                    return self.repository.update_connection(&updated).await;
+                }
                 let credential = replacement.ok_or_else(|| {
                     PortError::new(
                         "CREDENTIAL_REQUIRED",
@@ -74,9 +80,7 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
                 })?;
                 updated.credential_ref = existing.credential_ref.clone();
                 updated.plaintext_password = Some(credential.expose().to_owned());
-                self.repository.update_connection(&updated).await?;
-                let _ = self.credentials.delete(&existing.credential_ref).await;
-                Ok(())
+                self.repository.update_connection(&updated).await
             }
             (CredentialStorage::Plaintext, CredentialStorage::Keyring) => {
                 let credential = replacement.ok_or_else(|| {

@@ -399,6 +399,20 @@ async fn keyring_credentials_are_projected_as_same_length_asterisks() {
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn plaintext_credentials_are_projected_as_same_length_asterisks() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let profile = ConnectionProfile {
+        credential_storage: CredentialStorage::Plaintext,
+        plaintext_password: Some("secret123".into()),
+        ..profile("source", "unused")
+    };
+    let service = SettingsService::new(store, Arc::new(RecordingCredentialStore::default()));
+
+    assert_eq!(service.password_mask(&profile).await, "*********");
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn unavailable_keyring_credentials_still_have_a_visible_password_mask() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let profile = profile("source", "missing-keyring-entry");
@@ -503,6 +517,57 @@ async fn updating_a_connection_without_a_replacement_keeps_its_credential_refere
     let loaded = store.load_connection("source").unwrap();
     assert_eq!(loaded.display_name, "Renamed source");
     assert_eq!(loaded.credential_ref, "credential://db-relay/original");
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn updating_legacy_keyring_metadata_without_a_password_keeps_keyring_storage() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let existing = profile("source", "credential://db-relay/original");
+    store.save_connection(&existing).unwrap();
+    let requested = ConnectionProfile {
+        display_name: "Renamed source".into(),
+        credential_storage: CredentialStorage::Plaintext,
+        plaintext_password: None,
+        ..existing.clone()
+    };
+
+    SettingsService::new(store.clone(), Arc::new(RecordingCredentialStore::default()))
+        .update_connection(&requested, None)
+        .await
+        .unwrap();
+
+    let saved = store.load_connection("source").unwrap();
+    assert_eq!(saved.display_name, "Renamed source");
+    assert_eq!(saved.credential_storage, CredentialStorage::Keyring);
+    assert_eq!(saved.credential_ref, existing.credential_ref);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn replacing_a_legacy_keyring_password_keeps_the_keyring_entry() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let existing = profile("source", "credential://db-relay/original");
+    store.save_connection(&existing).unwrap();
+    let requested = ConnectionProfile {
+        credential_storage: CredentialStorage::Plaintext,
+        plaintext_password: Some("new-plaintext-password".into()),
+        ..existing.clone()
+    };
+    let credentials = Arc::new(RecordingCredentialStore::default());
+
+    SettingsService::new(store.clone(), credentials.clone())
+        .update_connection(&requested, Some(ResolvedSecret::for_test("new-plaintext-password")))
+        .await
+        .unwrap();
+
+    let saved = store.load_connection("source").unwrap();
+    assert_eq!(saved.credential_storage, CredentialStorage::Plaintext);
+    assert_eq!(
+        saved.plaintext_password.as_deref(),
+        Some("new-plaintext-password")
+    );
+    assert!(credentials.deleted_connection_ids().is_empty());
 }
 
 #[test]
