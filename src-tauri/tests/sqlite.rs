@@ -557,7 +557,10 @@ async fn replacing_a_legacy_keyring_password_keeps_the_keyring_entry() {
     let credentials = Arc::new(RecordingCredentialStore::default());
 
     SettingsService::new(store.clone(), credentials.clone())
-        .update_connection(&requested, Some(ResolvedSecret::for_test("new-plaintext-password")))
+        .update_connection(
+            &requested,
+            Some(ResolvedSecret::for_test("new-plaintext-password")),
+        )
         .await
         .unwrap();
 

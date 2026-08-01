@@ -29,3 +29,25 @@ it("shows a saved password as stars without a checkbox", () => {
   expect(screen.queryByLabelText("Encrypt password storage")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Source account is read-only")).not.toBeInTheDocument();
 });
+
+it("keeps the mask on focus and submits a directly typed plaintext replacement", () => {
+  const onSave = vi.fn();
+  render(<ConnectionForm connection={{
+    id: "production", displayName: "Production", kind: "oracle", host: "db.example.test", port: 1521,
+    serviceName: "ORCLPDB1", username: "relay", passwordMask: "********", enabled: true,
+  }} onSave={onSave} />);
+
+  const password = screen.getByLabelText("Password") as HTMLInputElement;
+  fireEvent.focus(password);
+
+  expect(password).toHaveValue("********");
+  expect(password.selectionStart).toBe(0);
+  expect(password.selectionEnd).toBe(8);
+
+  fireEvent.change(password, { target: { value: "new-plaintext-password" } });
+
+  expect(password).toHaveAttribute("type", "text");
+  expect(password).toHaveValue("new-plaintext-password");
+  fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
+  expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ password: "new-plaintext-password" }));
+});
