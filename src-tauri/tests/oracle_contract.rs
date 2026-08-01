@@ -361,7 +361,7 @@ fn oracle_test_connection() -> Option<(ConnectionProfile, String)> {
     let credentials_and_address = url.strip_prefix("oracle://")?;
     let (credentials, address) = credentials_and_address.split_once('@')?;
     let (username, password) = credentials.split_once(':')?;
-    let (host_port, service_name) = address.split_once('/')?;
+    let (host_port, sid) = address.split_once('/')?;
     let (host, port) = match host_port.split_once(':') {
         Some((host, port)) => (host, port.parse().ok()?),
         None => (host_port, 1521),
@@ -374,7 +374,7 @@ fn oracle_test_connection() -> Option<(ConnectionProfile, String)> {
             kind: DbKind::Oracle,
             host: host.into(),
             port,
-            sid: service_name.into(),
+            sid: sid.into(),
             username: username.into(),
             credential_ref: "credential://oracle-integration".into(),
             credential_storage: CredentialStorage::Keyring,

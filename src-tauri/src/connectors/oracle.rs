@@ -106,7 +106,7 @@ impl OracleConnector {
             .open(DriverConnectionInfo {
                 host: &profile.host,
                 port: profile.port,
-                service_name: &profile.sid,
+                sid: &profile.sid,
                 username: &profile.username,
                 password,
             })
@@ -256,7 +256,7 @@ impl TryFrom<&Value> for DriverValue {
 struct DriverConnectionInfo<'a> {
     host: &'a str,
     port: u16,
-    service_name: &'a str,
+    sid: &'a str,
     username: &'a str,
     password: &'a str,
 }
@@ -304,20 +304,24 @@ trait OracleDriverSession: Send {
 
 struct OracleRsDriver;
 
+fn oracle_config(connection: DriverConnectionInfo<'_>) -> Config {
+    Config::with_sid(
+        connection.host,
+        connection.port,
+        connection.sid,
+        connection.username,
+        connection.password,
+    )
+    .with_statement_cache_size(16)
+}
+
 #[async_trait]
 impl OracleDriver for OracleRsDriver {
     async fn open(
         &self,
         connection: DriverConnectionInfo<'_>,
     ) -> Result<Box<dyn OracleDriverSession>, DriverError> {
-        let config = Config::new(
-            connection.host,
-            connection.port,
-            connection.service_name,
-            connection.username,
-            connection.password,
-        )
-        .with_statement_cache_size(16);
+        let config = oracle_config(connection);
         let connection = Connection::connect_with_config(config)
             .await
             .map_err(oracle_error)?;
@@ -602,6 +606,20 @@ mod tests {
         assert!(
             matches!(values.as_slice(), [DriverValue::Int(7), DriverValue::Text(label)] if label == "first")
         );
+    }
+
+    #[test]
+    fn connection_configuration_uses_an_oracle_sid() {
+        let config = oracle_config(DriverConnectionInfo {
+            host: "db.example.test",
+            port: 1521,
+            sid: "XE",
+            username: "relay",
+            password: "",
+        });
+
+        assert_eq!(config.sid(), Some("XE"));
+        assert_eq!(config.service_name(), None);
     }
 
     #[test]
