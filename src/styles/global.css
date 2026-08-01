@@ -336,6 +336,96 @@ select {
   line-height: 1.5;
 }
 
+.run-dashboard,
+.history-detail,
+.run-history > aside {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.run-flow-picker {
+  display: grid;
+  gap: var(--space-1);
+  max-width: 520px;
+  margin: var(--space-5) 0;
+  font-weight: 700;
+}
+
+.run-flow-picker select {
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas);
+}
+
+.run-summary,
+.run-steps,
+.run-log,
+.history-detail,
+.run-history > aside {
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+}
+
+.run-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.run-summary p { margin: 0; }
+.run-steps { display: grid; gap: var(--space-2); }
+
+.run-log {
+  background: var(--color-dark);
+  color: var(--color-on-dark);
+}
+
+.run-log h2 { margin-top: 0; }
+.run-log pre { margin: 0; overflow-x: auto; font-family: var(--font-code); white-space: pre-wrap; }
+
+.run-history {
+  display: grid;
+  grid-template-columns: minmax(200px, 0.3fr) minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+.run-history > aside button {
+  min-height: 40px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas);
+  color: inherit;
+}
+
+.recovery-backdrop {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgb(24 23 21 / 60%);
+}
+
+.recovery-dialog {
+  width: min(100%, 680px);
+  padding: var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--color-canvas);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 24%);
+}
+
+.recovery-dialog h2 { margin-top: 0; }
+
+@media (max-width: 767px) {
+  .run-history { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 767px) {
   .section-heading,
   .connection-card,

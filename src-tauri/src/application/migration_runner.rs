@@ -14,20 +14,24 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunSnapshot {
     pub run_id: String,
+    pub policy: TransactionPolicy,
     pub status: RunStatus,
     pub steps: Vec<StepStatus>,
+    pub events: Vec<RunEvent>,
 }
 
 impl RunSnapshot {
     fn from_state(run_id: String, state: &RunState) -> Self {
         Self {
             run_id,
+            policy: state.policy(),
             status: state.status(),
             steps: state
                 .steps()
                 .iter()
                 .map(|step| step.status.clone())
                 .collect(),
+            events: state.events().to_vec(),
         }
     }
 }

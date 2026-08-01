@@ -5,7 +5,7 @@ use crate::{
     application::migration_runner::{
         MigrationRunner, RecoveryError, RecoveryRequest, RunSnapshot, StartRunError,
     },
-    domain::{RunStatus, StepStatus},
+    domain::{RunEvent, RunStatus, StepStatus, TransactionPolicy},
 };
 
 use super::{ApplicationContainer, CommandErrorDto};
@@ -39,16 +39,20 @@ pub enum RecoverRunRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RunResponse {
     pub run_id: String,
+    pub policy: TransactionPolicy,
     pub status: RunStatus,
     pub steps: Vec<StepStatus>,
+    pub events: Vec<RunEvent>,
 }
 
 impl From<RunSnapshot> for RunResponse {
     fn from(snapshot: RunSnapshot) -> Self {
         Self {
             run_id: snapshot.run_id,
+            policy: snapshot.policy,
             status: snapshot.status,
             steps: snapshot.steps,
+            events: snapshot.events,
         }
     }
 }

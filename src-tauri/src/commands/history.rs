@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::domain::{RunStatus, StepStatus};
+use crate::domain::{RunEvent, RunStatus, StepStatus, TransactionPolicy};
 
 use super::{ApplicationContainer, CommandErrorDto};
 
@@ -9,8 +9,10 @@ use super::{ApplicationContainer, CommandErrorDto};
 #[serde(rename_all = "camelCase")]
 pub struct RunHistoryResponse {
     pub run_id: String,
+    pub policy: TransactionPolicy,
     pub status: RunStatus,
     pub steps: Vec<StepStatus>,
+    pub events: Vec<RunEvent>,
 }
 
 #[tauri::command]
@@ -25,6 +27,7 @@ pub async fn list_run_history(
             runs.into_iter()
                 .map(|run| RunHistoryResponse {
                     run_id: run.run_id,
+                    policy: run.state.policy(),
                     status: run.state.status(),
                     steps: run
                         .state
@@ -32,6 +35,7 @@ pub async fn list_run_history(
                         .iter()
                         .map(|step| step.status.clone())
                         .collect(),
+                    events: run.state.events().to_vec(),
                 })
                 .collect()
         })

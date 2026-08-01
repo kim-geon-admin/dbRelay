@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { ConnectionList } from "../features/connections/ConnectionList";
 import { FlowLibrary } from "../features/flows/FlowLibrary";
+import { RunDashboard } from "../features/run/RunDashboard";
+import { RunHistory } from "../features/history/RunHistory";
 import "../styles/global.css";
 import { getRoute, routeFromHash, type RouteId } from "./routes";
 
@@ -31,6 +33,8 @@ export function App() {
   let content: React.ReactNode = <PlaceholderPage route={route} />;
   if (activeRoute === "database-settings") content = <ConnectionList />;
   if (activeRoute === "query-sequences") content = <FlowLibrary />;
+  if (activeRoute === "run") content = <RunDashboard />;
+  if (activeRoute === "run-history") content = <RunHistory />;
 
   return <AppShell activeRoute={activeRoute}>{content}</AppShell>;
 }

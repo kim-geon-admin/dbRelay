@@ -2,7 +2,7 @@ use db_relay::{
     commands::{
         ConnectionRequest, ConnectionResponse, RunHistoryResponse, UpdateConnectionRequest,
     },
-    domain::{ConnectionProfile, DbKind, RunStatus, StepStatus},
+    domain::{ConnectionProfile, DbKind, RunEvent, RunStatus, StepStatus, TransactionPolicy},
 };
 
 fn profile_with_secret_reference() -> ConnectionProfile {
@@ -65,8 +65,13 @@ fn connection_response_never_serializes_credential_material() {
 fn run_history_response_never_serializes_execution_data() {
     let response = RunHistoryResponse {
         run_id: "migration-42".into(),
+        policy: TransactionPolicy::CommitSuccesses,
         status: RunStatus::Completed,
         steps: vec![StepStatus::Succeeded { affected_rows: 3 }],
+        events: vec![RunEvent::RecoveryApplied {
+            step: 0,
+            action: db_relay::domain::RecoveryAction::SkipAndContinue,
+        }],
     };
 
     let json = serde_json::to_string(&response).unwrap();
