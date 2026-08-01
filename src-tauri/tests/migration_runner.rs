@@ -2,7 +2,7 @@ mod support;
 
 use db_relay::{
     application::{
-        migration_runner::MigrationRunner,
+        migration_runner::{MigrationRunner, RecoveryRequest},
         ports::{
             Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession, PortError,
             ResolvedSecret,
@@ -181,6 +181,158 @@ async fn successful_all_or_nothing_run_commits_target_once() {
 }
 
 #[tokio::test]
+async fn committed_steps_are_preserved_and_a_failure_waits_for_recovery() {
+    // Would fail if commit-successes ran all steps in one transaction or executed after a failure.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+
+    let run = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(run.status, RunStatus::AwaitingRecovery { failed_step: 1 });
+    assert_eq!(
+        harness.target_operations(),
+        [
+            "begin:0",
+            "execute:0",
+            "commit:0",
+            "begin:1",
+            "execute:1",
+            "rollback:1"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn skip_records_the_decision_then_completes_the_remaining_steps() {
+    // Would fail if skip did not persist the skipped status before resuming execution.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    let run = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::SkipAndContinue {
+                step_id: "address".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.steps[1], StepStatus::SkippedByUser);
+    assert_eq!(run.status, RunStatus::Completed);
+}
+
+#[tokio::test]
+async fn edit_and_retry_versions_the_flow_and_executes_the_failed_step() {
+    // Would fail if recovery updated another step, skipped validation, or did not resume execution.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    let run = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::EditAndRetry {
+                step_id: "address".into(),
+                select_sql: "select address_id from revised_address".into(),
+                upsert_sql: "merge revised_address using dual on (address_id = :ADDRESS_ID)".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.status, RunStatus::Completed);
+    assert!(matches!(
+        run.steps[1],
+        StepStatus::Succeeded { affected_rows: 1 }
+    ));
+    let flow = harness.history.load_flow(&harness.flow_id).unwrap();
+    assert_eq!(flow.version, 2);
+    assert_eq!(
+        flow.query_steps[1].select_sql,
+        "select address_id from revised_address"
+    );
+}
+
+#[tokio::test]
+async fn retry_failure_returns_to_awaiting_recovery() {
+    // Would fail if a retry failure escaped without restoring the recoverable state.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    harness
+        .connector
+        .fail_target_step(2, PortError::new("FAKE_RETRY", "retry target write failed"));
+
+    let run = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::EditAndRetry {
+                step_id: "address".into(),
+                select_sql: "select address_id from address".into(),
+                upsert_sql: "merge address using dual on (address_id = :ADDRESS_ID)".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.status, RunStatus::AwaitingRecovery { failed_step: 1 });
+    assert_eq!(run.steps[0], StepStatus::Succeeded { affected_rows: 1 });
+    assert_eq!(run.steps[1], StepStatus::Failed);
+}
+
+#[tokio::test]
+async fn recovery_rejects_a_request_for_a_nonfailed_step() {
+    // Would fail if recovery trusted a client-provided step ID instead of the paused run state.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    let error = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::SkipAndContinue {
+                step_id: "customer".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "RECOVERY_STEP_MISMATCH");
+}
+
+#[tokio::test]
+async fn stop_preserves_committed_steps_and_does_not_execute_later_steps() {
+    // Would fail if stop continued the run after recording the user's decision.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(0);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    let run = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::Stop {
+                step_id: "customer".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.status, RunStatus::StoppedByUser);
+    assert_eq!(run.steps[1], StepStatus::NotRun);
+    assert_eq!(
+        harness.target_operations(),
+        ["begin:0", "execute:0", "rollback:0"]
+    );
+}
+
+#[tokio::test]
 async fn source_query_failure_after_preflight_rolls_back_target() {
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
         .source_rows_for_step(0, rows_for_customer())
@@ -298,6 +450,9 @@ impl RunnerHarness {
         ));
         credentials.insert("credential://target", "target-secret");
         let connector = Arc::new(RunnerConnectorFactory::default());
+        connector.set_committed_step_labels(policy == TransactionPolicy::CommitSuccesses);
+        connector.set_source_rows(0, rows_for_customer());
+        connector.set_source_rows(1, rows_for_address());
         let runner = MigrationRunner::new(
             connector.clone(),
             repository.clone(),
@@ -389,9 +544,14 @@ struct RunnerConnectorState {
     target_execute_count: Mutex<usize>,
     target_failures: Mutex<BTreeMap<usize, PortError>>,
     target_commit_failure: Mutex<Option<PortError>>,
+    committed_step_labels: Mutex<bool>,
 }
 
 impl RunnerConnectorFactory {
+    fn set_committed_step_labels(&self, enabled: bool) {
+        *self.state.committed_step_labels.lock().unwrap() = enabled;
+    }
+
     fn set_source_rows(&self, step: usize, rows: RowSet) {
         self.state.source_rows.lock().unwrap().insert(step, rows);
     }
@@ -450,7 +610,7 @@ struct RunnerSourceSession {
 
 #[async_trait::async_trait]
 impl DatabaseSession for RunnerSourceSession {
-    async fn query(&mut self, _sql: &str) -> Result<RowSet, PortError> {
+    async fn query(&mut self, sql: &str) -> Result<RowSet, PortError> {
         let query = {
             let mut count = self.state.source_query_count.lock().unwrap();
             let query = *count;
@@ -467,7 +627,7 @@ impl DatabaseSession for RunnerSourceSession {
         {
             return Err(error);
         }
-        let step = query % 2;
+        let step = usize::from(sql.contains("address"));
         self.state
             .source_rows
             .lock()
@@ -502,11 +662,13 @@ impl DatabaseSession for RunnerTargetSession {
     }
 
     async fn begin(&mut self) -> Result<(), PortError> {
-        self.state
-            .target_operations
-            .lock()
-            .unwrap()
-            .push("begin".into());
+        let operation = if *self.state.committed_step_labels.lock().unwrap() {
+            let step = *self.state.target_execute_count.lock().unwrap();
+            format!("begin:{step}")
+        } else {
+            "begin".into()
+        };
+        self.state.target_operations.lock().unwrap().push(operation);
         Ok(())
     }
 
@@ -536,11 +698,18 @@ impl DatabaseSession for RunnerTargetSession {
     }
 
     async fn commit(&mut self) -> Result<(), PortError> {
-        self.state
-            .target_operations
-            .lock()
-            .unwrap()
-            .push("commit".into());
+        let operation = if *self.state.committed_step_labels.lock().unwrap() {
+            let step = self
+                .state
+                .target_execute_count
+                .lock()
+                .unwrap()
+                .saturating_sub(1);
+            format!("commit:{step}")
+        } else {
+            "commit".into()
+        };
+        self.state.target_operations.lock().unwrap().push(operation);
         self.state
             .target_commit_failure
             .lock()
@@ -550,11 +719,18 @@ impl DatabaseSession for RunnerTargetSession {
     }
 
     async fn rollback(&mut self) -> Result<(), PortError> {
-        self.state
-            .target_operations
-            .lock()
-            .unwrap()
-            .push("rollback".into());
+        let operation = if *self.state.committed_step_labels.lock().unwrap() {
+            let step = self
+                .state
+                .target_execute_count
+                .lock()
+                .unwrap()
+                .saturating_sub(1);
+            format!("rollback:{step}")
+        } else {
+            "rollback".into()
+        };
+        self.state.target_operations.lock().unwrap().push(operation);
         Ok(())
     }
 }
