@@ -1,10 +1,21 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
+import { ConnectionList } from "../features/connections/ConnectionList";
+import { FlowLibrary } from "../features/flows/FlowLibrary";
 import "../styles/global.css";
 import { getRoute, routeFromHash, type RouteId } from "./routes";
 
 function currentRoute(): RouteId {
   return routeFromHash(window.location.hash);
+}
+
+function PlaceholderPage({ route }: { route: ReturnType<typeof getRoute> }) {
+  return <section className="app-page" aria-labelledby="page-title">
+    <p className="app-page__eyebrow">DB Relay</p>
+    <h1 className="app-page__title" id="page-title">{route.label}</h1>
+    <p className="app-page__description">{route.description}</p>
+    <div className="app-page__placeholder">This screen will be completed in a later task.</div>
+  </section>;
 }
 
 export function App() {
@@ -17,16 +28,9 @@ export function App() {
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
-  return (
-    <AppShell activeRoute={activeRoute}>
-      <section className="app-page" aria-labelledby="page-title">
-        <p className="app-page__eyebrow">DB Relay</p>
-        <h1 className="app-page__title" id="page-title">{route.label}</h1>
-        <p className="app-page__description">{route.description}</p>
-        <div className="app-page__placeholder">
-          이 화면의 세부 기능은 다음 작업에서 추가됩니다.
-        </div>
-      </section>
-    </AppShell>
-  );
+  let content: React.ReactNode = <PlaceholderPage route={route} />;
+  if (activeRoute === "database-settings") content = <ConnectionList />;
+  if (activeRoute === "query-sequences") content = <FlowLibrary />;
+
+  return <AppShell activeRoute={activeRoute}>{content}</AppShell>;
 }

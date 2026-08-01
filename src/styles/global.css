@@ -223,3 +223,124 @@ select {
     padding: var(--space-5) var(--space-4);
   }
 }
+
+.section-heading,
+.editor-actions,
+.connection-card,
+.flow-library {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.section-heading,
+.connection-card {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.editor-form,
+.query-step,
+.connection-card,
+.flow-library > aside {
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+}
+
+.editor-form {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 760px;
+  margin: var(--space-5) 0;
+  padding: var(--space-5);
+}
+
+.editor-form label,
+.query-step label {
+  display: grid;
+  gap: var(--space-1);
+  font-weight: 600;
+}
+
+.editor-form input,
+.editor-form select,
+.editor-form textarea,
+.editor-form button,
+.connection-card button,
+.flow-library button {
+  min-height: 40px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas);
+  color: inherit;
+  padding: 8px 10px;
+}
+
+.editor-form button[type="submit"],
+.section-heading > button {
+  border-color: var(--color-coral);
+  background: var(--color-coral);
+  color: #fff;
+  font-weight: 700;
+}
+
+.field-hint {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  font-weight: 400;
+}
+
+.connection-list {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-5) 0;
+  padding: 0;
+  list-style: none;
+}
+
+.connection-card {
+  padding: var(--space-4);
+}
+
+.connection-card p {
+  margin: var(--space-1) 0 0;
+  color: var(--color-body);
+  font-family: var(--font-code);
+  font-size: 0.875rem;
+}
+
+.flow-library {
+  align-items: flex-start;
+  margin-top: var(--space-5);
+}
+
+.flow-library > aside {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 220px;
+  padding: var(--space-4);
+}
+
+.query-step {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-4);
+}
+
+.sql-editor {
+  min-height: 120px;
+  resize: vertical;
+  font-family: var(--font-code);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 767px) {
+  .section-heading,
+  .connection-card,
+  .flow-library {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
