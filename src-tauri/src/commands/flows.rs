@@ -3,7 +3,10 @@ use tauri::State;
 
 use crate::{
     application::flow_service::FlowService,
-    domain::{Flow, QueryStep, TransactionPolicy},
+    domain::{
+        validate_source_statement, validate_target_statement, DbKind, Flow, QueryStep,
+        TransactionPolicy,
+    },
 };
 
 use super::{ApplicationContainer, CommandErrorDto};
@@ -116,7 +119,7 @@ pub async fn duplicate_flow(
 }
 
 impl FlowRequest {
-    fn into_flow(self) -> Result<Flow, CommandErrorDto> {
+    pub fn into_flow(self) -> Result<Flow, CommandErrorDto> {
         validate_required(&self.id, "flow ID")?;
         validate_required(&self.name, "flow name")?;
         validate_required(&self.source_connection_id, "source connection ID")?;
@@ -134,6 +137,10 @@ impl FlowRequest {
                 validate_required(&step.id, "query step ID")?;
                 validate_required(&step.select_sql, "source SQL")?;
                 validate_required(&step.upsert_sql, "target SQL")?;
+                validate_source_statement(&step.select_sql)
+                    .map_err(|error| CommandErrorDto::validation(error.message()))?;
+                validate_target_statement(DbKind::Oracle, &step.upsert_sql)
+                    .map_err(|error| CommandErrorDto::validation(error.message()))?;
                 Ok(QueryStep {
                     id: step.id,
                     select_sql: step.select_sql,

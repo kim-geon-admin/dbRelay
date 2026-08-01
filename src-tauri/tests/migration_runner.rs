@@ -166,6 +166,32 @@ async fn missing_bind_column_blocks_execution_before_target_begin() {
 }
 
 #[tokio::test]
+async fn zero_row_source_without_required_alias_blocks_execution_before_target_begin() {
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(0, RowSet::default())
+        .source_rows_for_step(1, rows_for_address());
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(harness.target_operations(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn numeric_target_bind_blocks_execution_before_target_begin() {
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing).step_sql(
+        0,
+        "select id from customer",
+        "merge customer using dual on (id = :1)",
+    );
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(harness.target_operations(), Vec::<String>::new());
+}
+
+#[tokio::test]
 async fn successful_all_or_nothing_run_commits_target_once() {
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
         .source_rows_for_step(0, rows_for_customer())
@@ -283,6 +309,33 @@ async fn retry_failure_returns_to_awaiting_recovery() {
     assert_eq!(run.status, RunStatus::AwaitingRecovery { failed_step: 1 });
     assert_eq!(run.steps[0], StepStatus::Succeeded { affected_rows: 1 });
     assert_eq!(run.steps[1], StepStatus::Failed);
+}
+
+#[tokio::test]
+async fn recovery_rechecks_changed_zero_row_metadata_before_opening_a_target_transaction() {
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    let operations_before_recovery = harness.target_operations();
+
+    // Query 4 is the recovery preflight; query 5 is the execution read that
+    // must still be prepared before `begin`.
+    harness.source_rows_for_query(5, RowSet::default());
+    let run = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::EditAndRetry {
+                step_id: "address".into(),
+                select_sql: "select address_id from address".into(),
+                upsert_sql: "merge address using dual on (address_id = :ADDRESS_ID)".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.status, RunStatus::AwaitingRecovery { failed_step: 1 });
+    assert_eq!(harness.target_operations(), operations_before_recovery);
 }
 
 #[tokio::test]
@@ -638,6 +691,18 @@ impl RunnerHarness {
         self
     }
 
+    fn source_rows_for_query(&self, query: usize, rows: RowSet) {
+        self.connector.set_source_rows_for_query(query, rows);
+    }
+
+    fn step_sql(self, step: usize, select_sql: &str, upsert_sql: &str) -> Self {
+        let mut flow = self.history.load_flow(&self.flow_id).unwrap();
+        flow.query_steps[step].select_sql = select_sql.into();
+        flow.query_steps[step].upsert_sql = upsert_sql.into();
+        self.history.save_flow(&flow).unwrap();
+        self
+    }
+
     fn source_fails_while_executing_step(self, step: usize) -> Self {
         self.connector.fail_source_query_at(2 + step);
         self
@@ -834,6 +899,7 @@ impl Default for RunnerConnectorFactory {
 #[derive(Default)]
 struct RunnerConnectorState {
     source_rows: Mutex<BTreeMap<usize, RowSet>>,
+    source_rows_by_query: Mutex<BTreeMap<usize, RowSet>>,
     source_query_count: Mutex<usize>,
     source_failures: Mutex<BTreeMap<usize, PortError>>,
     target_operations: Mutex<Vec<String>>,
@@ -850,6 +916,14 @@ impl RunnerConnectorFactory {
 
     fn set_source_rows(&self, step: usize, rows: RowSet) {
         self.state.source_rows.lock().unwrap().insert(step, rows);
+    }
+
+    fn set_source_rows_for_query(&self, query: usize, rows: RowSet) {
+        self.state
+            .source_rows_by_query
+            .lock()
+            .unwrap()
+            .insert(query, rows);
     }
 
     fn fail_source_query_at(&self, query: usize) {
@@ -922,6 +996,16 @@ impl DatabaseSession for RunnerSourceSession {
             .cloned()
         {
             return Err(error);
+        }
+        if let Some(rows) = self
+            .state
+            .source_rows_by_query
+            .lock()
+            .unwrap()
+            .get(&query)
+            .cloned()
+        {
+            return Ok(rows);
         }
         let step = usize::from(sql.contains("address"));
         self.state

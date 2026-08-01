@@ -1,4 +1,34 @@
-use db_relay::domain::{extract_named_binds, map_row, MappingError, Row, Value};
+use db_relay::domain::{
+    extract_named_binds, map_row, validate_source_statement, validate_target_statement, DbKind,
+    MappingError, Row, Value,
+};
+
+#[test]
+fn accepts_read_only_source_queries_and_oracle_merge_targets() {
+    assert!(validate_source_statement("SELECT id FROM customer").is_ok());
+    assert!(validate_source_statement(
+        "/* report */ WITH c AS (SELECT id FROM customer) SELECT id FROM c"
+    )
+    .is_ok());
+    assert!(validate_target_statement(
+        DbKind::Oracle,
+        "MERGE INTO customer target USING dual ON (1 = 1) WHEN MATCHED THEN UPDATE SET target.id = 1",
+    )
+    .is_ok());
+}
+
+#[test]
+fn rejects_unsafe_statement_forms_before_they_reach_a_connector() {
+    assert!(validate_source_statement("DELETE FROM customer").is_err());
+    assert!(validate_source_statement("SELECT id FROM customer; DELETE FROM customer").is_err());
+    assert!(validate_target_statement(DbKind::Oracle, "TRUNCATE TABLE customer").is_err());
+    assert!(validate_target_statement(DbKind::Oracle, "BEGIN DELETE FROM customer; END;").is_err());
+    assert!(validate_target_statement(
+        DbKind::Oracle,
+        "MERGE INTO customer USING dual ON (id = :1)"
+    )
+    .is_err());
+}
 
 #[test]
 fn maps_oracle_binds_to_source_columns_without_case_sensitivity() {

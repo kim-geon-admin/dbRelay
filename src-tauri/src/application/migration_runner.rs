@@ -6,8 +6,9 @@ use crate::{
         FlowRepository, HistoryRepository, PortError, ResolvedSecret, RunBinding,
     },
     domain::{
-        extract_named_binds, map_row, ConnectionProfile, Flow, RecoveryAction, RunError, RunEvent,
-        RunState, RunStatus, StepStatus, TransactionPolicy,
+        extract_named_binds, map_row, validate_row_set_columns, validate_source_statement,
+        validate_target_statement, ConnectionProfile, DbKind, Flow, RecoveryAction, RunError,
+        RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy,
     },
 };
 
@@ -262,6 +263,14 @@ impl<
                 .await;
         }
 
+        for (step_index, step) in flow.query_steps.iter().enumerate() {
+            if let Err(error) = validate_step_policy(target_profile.kind, step) {
+                return self
+                    .persist_preflight_failure(&flow, &run_id, step_index, error)
+                    .await;
+            }
+        }
+
         let binding = RunBinding {
             flow: flow.clone(),
             source_profile: source_profile.clone(),
@@ -303,31 +312,12 @@ impl<
         };
 
         for (step_index, step) in flow.query_steps.iter().enumerate() {
-            let binds = extract_named_binds(&step.upsert_sql).map_err(|_| {
-                StartRunError::new(
-                    "MAPPING_INVALID",
-                    "target bind syntax could not be validated",
-                )
-            })?;
-            let rows = match source.query(&step.select_sql).await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    return self
-                        .persist_preflight_failure(&flow, &run_id, step_index, run_error(error))
-                        .await
-                }
-            };
-            if rows.rows.iter().any(|row| map_row(row, &binds).is_err()) {
+            if let Err(error) = self
+                .preflight_step(&mut source, target_profile.kind, step)
+                .await
+            {
                 return self
-                    .persist_preflight_failure(
-                        &flow,
-                        &run_id,
-                        step_index,
-                        RunError::connector(
-                            "MAPPING_INVALID",
-                            "source columns do not satisfy target bind parameters",
-                        ),
-                    )
+                    .persist_preflight_failure(&flow, &run_id, step_index, error)
                     .await;
             }
         }
@@ -349,6 +339,11 @@ impl<
         for (step_index, step) in flow.query_steps.iter().enumerate() {
             let failure = match source.query(&step.select_sql).await {
                 Ok(rows) => {
+                    if let Err(error) = validate_step_policy(target_profile.kind, step) {
+                        return self
+                            .rollback_after_failure(&run_id, &mut target, state, step_index, error)
+                            .await;
+                    }
                     let binds = match extract_named_binds(&step.upsert_sql) {
                         Ok(binds) => binds,
                         Err(_) => {
@@ -558,7 +553,11 @@ impl<
                     }
                 };
                 if let Err(error) = self
-                    .preflight_step(&mut source, &binding.flow.query_steps[failed_step])
+                    .preflight_step(
+                        &mut source,
+                        binding.target_profile.kind,
+                        &binding.flow.query_steps[failed_step],
+                    )
                     .await
                 {
                     return self
@@ -600,6 +599,28 @@ impl<
         };
 
         for step_index in start_step..flow.query_steps.len() {
+            let step = &flow.query_steps[step_index];
+            if let Err(error) = validate_step_policy(binding.target_profile.kind, step) {
+                state.record_step_failure(step_index, error).map_err(|_| {
+                    StartRunError::new(
+                        "RUN_STATE_INVALID",
+                        "run state could not record a failed step",
+                    )
+                })?;
+                return self.persist_bound(run_id, &state, binding).await;
+            }
+            let batch = match self.prepare_step_batch(source, step).await {
+                Ok(batch) => batch,
+                Err(error) => {
+                    state.record_step_failure(step_index, error).map_err(|_| {
+                        StartRunError::new(
+                            "RUN_STATE_INVALID",
+                            "run state could not record a failed step",
+                        )
+                    })?;
+                    return self.persist_bound(run_id, &state, binding).await;
+                }
+            };
             if let Err(error) = target.begin().await {
                 return self
                     .rollback_committed_failure(
@@ -612,10 +633,7 @@ impl<
                     )
                     .await;
             }
-            let affected_rows = match self
-                .execute_step(source, target, &flow.query_steps[step_index])
-                .await
-            {
+            let affected_rows = match self.execute_step(target, step, &batch).await {
                 Ok(affected_rows) => affected_rows,
                 Err(error) => {
                     return self
@@ -671,53 +689,33 @@ impl<
 
     async fn execute_step(
         &self,
-        source: &mut Box<dyn DatabaseSession>,
         target: &mut Box<dyn DatabaseSession>,
         step: &crate::domain::QueryStep,
+        batch: &[crate::domain::NamedRow],
     ) -> Result<u64, RunError> {
-        let rows = source.query(&step.select_sql).await.map_err(run_error)?;
-        let binds = extract_named_binds(&step.upsert_sql).map_err(|_| {
-            RunError::connector(
-                "MAPPING_INVALID",
-                "target bind syntax could not be validated",
-            )
-        })?;
-        let batch = rows
-            .rows
-            .iter()
-            .map(|row| map_row(row, &binds))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| {
-                RunError::connector(
-                    "MAPPING_INVALID",
-                    "source columns do not satisfy target bind parameters",
-                )
-            })?;
         target
-            .execute_named(&step.upsert_sql, &batch)
+            .execute_named(&step.upsert_sql, batch)
             .await
             .map_err(run_error)
+    }
+
+    async fn prepare_step_batch(
+        &self,
+        source: &mut Box<dyn DatabaseSession>,
+        step: &crate::domain::QueryStep,
+    ) -> Result<Vec<crate::domain::NamedRow>, RunError> {
+        let rows = source.query(&step.select_sql).await.map_err(run_error)?;
+        map_batch(&rows, &step.upsert_sql)
     }
 
     async fn preflight_step(
         &self,
         source: &mut Box<dyn DatabaseSession>,
+        target_kind: DbKind,
         step: &crate::domain::QueryStep,
     ) -> Result<(), RunError> {
-        let binds = extract_named_binds(&step.upsert_sql).map_err(|_| {
-            RunError::connector(
-                "MAPPING_INVALID",
-                "target bind syntax could not be validated",
-            )
-        })?;
-        let rows = source.query(&step.select_sql).await.map_err(run_error)?;
-        if rows.rows.iter().any(|row| map_row(row, &binds).is_err()) {
-            return Err(RunError::connector(
-                "MAPPING_INVALID",
-                "source columns do not satisfy target bind parameters",
-            ));
-        }
-        Ok(())
+        validate_step_policy(target_kind, step)?;
+        self.prepare_step_batch(source, step).await.map(|_| ())
     }
 
     async fn ensure_recovery_binding(&self, binding: &RunBinding) -> Result<(), RecoveryError> {
@@ -936,6 +934,45 @@ impl<
 
 fn run_error(error: PortError) -> RunError {
     RunError::connector_with_retryable(error.code(), error.message(), error.retryable())
+}
+
+fn validate_step_policy(kind: DbKind, step: &crate::domain::QueryStep) -> Result<(), RunError> {
+    validate_source_statement(&step.select_sql)
+        .and_then(|()| validate_target_statement(kind, &step.upsert_sql))
+        .map_err(|_| {
+            RunError::connector(
+                "STATEMENT_INVALID",
+                "source and target SQL must follow the migration statement policy",
+            )
+        })
+}
+
+fn map_batch(
+    rows: &crate::domain::RowSet,
+    upsert_sql: &str,
+) -> Result<Vec<crate::domain::NamedRow>, RunError> {
+    let binds = extract_named_binds(upsert_sql).map_err(|_| {
+        RunError::connector(
+            "MAPPING_INVALID",
+            "target bind syntax could not be validated",
+        )
+    })?;
+    validate_row_set_columns(rows, &binds).map_err(|_| {
+        RunError::connector(
+            "MAPPING_INVALID",
+            "source columns do not satisfy target bind parameters",
+        )
+    })?;
+    rows.rows
+        .iter()
+        .map(|row| map_row(row, &binds))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            RunError::connector(
+                "MAPPING_INVALID",
+                "source columns do not satisfy target bind parameters",
+            )
+        })
 }
 
 fn recovery_state_error(error: RunError) -> RecoveryError {

@@ -1,6 +1,7 @@
 use db_relay::{
     commands::{
-        ConnectionRequest, ConnectionResponse, RunHistoryResponse, UpdateConnectionRequest,
+        ConnectionRequest, ConnectionResponse, FlowRequest, QueryStepRequest, RunHistoryResponse,
+        UpdateConnectionRequest,
     },
     domain::{ConnectionProfile, DbKind, RunEvent, RunStatus, StepStatus, TransactionPolicy},
 };
@@ -79,4 +80,31 @@ fn run_history_response_never_serializes_execution_data() {
     assert!(!json.contains("source_rows"));
     assert!(!json.contains("bind_values"));
     assert!(!json.contains("binding"));
+}
+
+#[test]
+fn flow_request_rejects_unsafe_source_and_target_statements() {
+    let mut request = valid_flow_request();
+    request.query_steps[0].select_sql = "DELETE FROM customer".into();
+    assert_eq!(request.into_flow().unwrap_err().code, "INVALID_REQUEST");
+
+    let mut request = valid_flow_request();
+    request.query_steps[0].upsert_sql = "TRUNCATE TABLE customer".into();
+    assert_eq!(request.into_flow().unwrap_err().code, "INVALID_REQUEST");
+}
+
+fn valid_flow_request() -> FlowRequest {
+    FlowRequest {
+        id: "flow-1".into(),
+        name: "Migration".into(),
+        source_connection_id: "source".into(),
+        target_connection_id: "target".into(),
+        query_steps: vec![QueryStepRequest {
+            id: "customer".into(),
+            select_sql: "SELECT id FROM customer".into(),
+            upsert_sql: "MERGE INTO customer USING dual ON (id = :ID)".into(),
+        }],
+        transaction_policy: TransactionPolicy::AllOrNothing,
+        version: 1,
+    }
 }

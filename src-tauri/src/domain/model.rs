@@ -92,12 +92,16 @@ impl<const N: usize> From<[(&str, Value); N]> for Row {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RowSet {
+    #[serde(default)]
+    pub columns: Vec<String>,
     pub rows: Vec<Row>,
 }
 
 impl RowSet {
     pub fn single<const N: usize>(columns: [(&str, Value); N]) -> Self {
+        let column_names = columns.iter().map(|(column, _)| (*column).into()).collect();
         Self {
+            columns: column_names,
             rows: vec![Row::from(columns)],
         }
     }
@@ -109,4 +113,28 @@ pub type NamedRow = BTreeMap<String, Value>;
 pub enum MappingError {
     MissingSourceColumn { parameter: String },
     DuplicateSourceColumn { column: String },
+    NumericBind { parameter: String },
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidationError {
+    message: &'static str,
+}
+
+impl ValidationError {
+    pub(crate) const fn new(message: &'static str) -> Self {
+        Self { message }
+    }
+
+    pub fn message(&self) -> &'static str {
+        self.message
+    }
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ValidationError {}

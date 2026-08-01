@@ -350,7 +350,10 @@ impl OracleDriverSession for OracleRsSession {
                 )
             })
             .collect();
-        Ok(RowSet { rows })
+        Ok(RowSet {
+            columns: names,
+            rows,
+        })
     }
 
     async fn begin(&mut self) -> Result<(), DriverError> {
