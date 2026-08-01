@@ -13,6 +13,14 @@
 - Focused UI tests pass: `pnpm vitest run src/features/run/RecoveryDialog.test.tsx src/features/run/RunDashboard.test.tsx src/features/history/RunDetail.test.tsx` (3 tests).
 - Command serialization test passes: `cargo test --manifest-path src-tauri/Cargo.toml --test commands run_history_response_never_serializes_execution_data`.
 
+## Review fix round 1
+
+- Recovery dialog content is keyed by run ID and failed-step index, so a new failure remounts with its own choice mode and SQL values.
+- The dialog now focuses its first recovery action, traps Tab and Shift+Tab within visible dialog controls, and restores prior focus when recovery resolves. The dashboard Run control is disabled while recovery is awaiting a decision.
+- Execution duration is captured only between the `startRun` request and its response, then stored as a fixed value. Recovery time and later re-renders cannot increase it.
+- Added regression tests for remount state reset, modal focus/trapping/restoration, disabled background Run control, and frozen duration.
+- Verification: focused run/history tests (7), full UI suite (16), `pnpm lint`, and `pnpm build` passed.
+
 ## Final verification
 
 - `pnpm test` — 12 tests passed.

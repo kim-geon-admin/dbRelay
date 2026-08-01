@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 import { RecoveryDialog } from "./RecoveryDialog";
 import type { Run } from "./run.types";
@@ -20,4 +20,35 @@ it("offers exactly the three recovery decisions for a committed-step failure", (
   expect(screen.getByRole("button", { name: /skip and continue/i })).toBeVisible();
   expect(screen.getByRole("button", { name: /^stop$/i })).toBeVisible();
   expect(screen.getAllByRole("button")).toHaveLength(3);
+});
+
+it("resets its mode and SQL when a different failed step replaces the run", () => {
+  const { rerender } = render(<RecoveryDialog run={run} step={{ id: "step-2", selectSql: "SELECT old", upsertSql: "MERGE old" }} onEditRetry={vi.fn()} onSkip={vi.fn()} onStop={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: /edit and retry/i }));
+  expect(screen.getByDisplayValue("SELECT old")).toBeVisible();
+
+  rerender(<RecoveryDialog run={{ ...run, runId: "run-2", status: { awaiting_recovery: { failed_step: 0 } }, steps: ["failed"], events: [{ type: "step_failed", step: 0, error: { connector: { code: "ORA-00002", message: "new failure", retryable: false } } }] }} step={{ id: "step-1", selectSql: "SELECT new", upsertSql: "MERGE new" }} onEditRetry={vi.fn()} onSkip={vi.fn()} onStop={vi.fn()} />);
+
+  expect(screen.getByRole("button", { name: /edit and retry/i })).toBeVisible();
+  expect(screen.queryByDisplayValue("SELECT old")).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Source SQL" })).not.toBeInTheDocument();
+});
+
+it("focuses the first action, traps Tab, and restores prior focus when closed", () => {
+  const trigger = document.createElement("button");
+  document.body.append(trigger);
+  trigger.focus();
+  const view = render(<RecoveryDialog run={run} onEditRetry={vi.fn()} onSkip={vi.fn()} onStop={vi.fn()} />);
+  const edit = screen.getByRole("button", { name: /edit and retry/i });
+  const stop = screen.getByRole("button", { name: /^stop$/i });
+  expect(edit).toHaveFocus();
+
+  fireEvent.keyDown(edit, { key: "Tab", shiftKey: true });
+  expect(stop).toHaveFocus();
+  fireEvent.keyDown(stop, { key: "Tab" });
+  expect(edit).toHaveFocus();
+
+  view.unmount();
+  expect(trigger).toHaveFocus();
+  trigger.remove();
 });
