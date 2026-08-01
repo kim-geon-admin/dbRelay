@@ -608,6 +608,40 @@ fn opening_a_legacy_failed_run_rewrites_it_as_safe_readable_history() {
     assert!(!dump.contains("legacy-raw-history-secret-fixture"));
 }
 
+#[test]
+fn opening_a_legacy_stored_run_resanitizes_an_arbitrary_connector_code() {
+    let path = std::env::temp_dir().join(format!(
+        "db-relay-legacy-stored-run-{}-{}.sqlite",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            r#"
+            CREATE TABLE runs (id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL);
+            INSERT INTO runs VALUES (
+                'legacy-stored-run',
+                '{"policy":"commit_successes","status":{"awaiting_recovery":{"failed_step":0}},"steps":["failed"],"events":[{"type":"step_failed","step":0,"error_code":"legacy-stored-code-secret-fixture"}]}'
+            );
+            "#,
+        )
+        .unwrap();
+    drop(legacy);
+
+    let store = SqliteStore::open(&path).unwrap();
+    let loaded = store.load_run("legacy-stored-run").unwrap();
+    let dump = store.dump_for_test();
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+
+    assert!(loaded.is_some());
+    assert!(!dump.contains("legacy-stored-code-secret-fixture"));
+}
+
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn settings_service_uses_the_stable_connection_id_for_keyring_storage() {

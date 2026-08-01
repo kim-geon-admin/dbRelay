@@ -61,6 +61,15 @@ impl StoredRun {
             .collect();
         RunState::from_history(self.policy, self.status, self.steps, events)
     }
+
+    fn sanitize(mut self) -> Self {
+        for event in &mut self.events {
+            if let StoredRunEvent::StepFailed { error_code, .. } = event {
+                *error_code = RunError::connector(std::mem::take(error_code), "").history_code();
+            }
+        }
+        self
+    }
 }
 
 impl StoredRunEvent {
@@ -757,17 +766,18 @@ fn migrate_legacy_run_history(connection: &mut Connection) -> rusqlite::Result<(
     };
 
     for (run_id, state_json) in legacy_runs {
-        if serde_json::from_str::<StoredRun>(&state_json).is_ok() {
-            continue;
-        }
-        let stored = serde_json::from_str::<RunState>(&state_json)
-            .map(|state| StoredRun::from_state(&state))
+        let stored = serde_json::from_str::<StoredRun>(&state_json)
+            .or_else(|_| {
+                serde_json::from_str::<RunState>(&state_json)
+                    .map(|state| StoredRun::from_state(&state))
+            })
             .unwrap_or_else(|_| StoredRun {
                 policy: TransactionPolicy::AllOrNothing,
                 status: RunStatus::Failed,
                 steps: Vec::new(),
                 events: Vec::new(),
-            });
+            })
+            .sanitize();
         let sanitized_json =
             serde_json::to_string(&stored).map_err(|_| rusqlite::Error::InvalidQuery)?;
         transaction.execute(
