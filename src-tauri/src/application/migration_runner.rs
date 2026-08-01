@@ -2,8 +2,8 @@ use std::{sync::Arc, time::UNIX_EPOCH};
 
 use crate::{
     application::ports::{
-        Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession, FlowRepository,
-        HistoryRepository, PortError, ResolvedSecret, RunBinding,
+        BoundRecoveryApply, Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession,
+        FlowRepository, HistoryRepository, PortError, ResolvedSecret, RunBinding,
     },
     domain::{
         extract_named_binds, map_row, ConnectionProfile, Flow, RecoveryAction, RunError, RunEvent,
@@ -434,6 +434,7 @@ impl<
                 )
             })?;
         self.ensure_recovery_binding(&binding).await?;
+        let paused_binding = binding.clone();
         let requested_step_id = match &request {
             RecoveryRequest::EditAndRetry { step_id, .. }
             | RecoveryRequest::SkipAndContinue { step_id }
@@ -457,13 +458,16 @@ impl<
                 state
                     .apply_recovery(RecoveryAction::Stop)
                     .map_err(recovery_state_error)?;
-                self.persist_recovery(run_id, &state, &binding).await
+                self.apply_bound_recovery(run_id, &state, &binding, &binding, None)
+                    .await?;
+                Ok(RunSnapshot::from_state(run_id.into(), &state))
             }
             RecoveryRequest::SkipAndContinue { .. } => {
                 state
                     .apply_recovery(RecoveryAction::SkipAndContinue)
                     .map_err(recovery_state_error)?;
-                self.persist_recovery(run_id, &state, &binding).await?;
+                self.apply_bound_recovery(run_id, &state, &binding, &binding, None)
+                    .await?;
                 if matches!(state.status(), RunStatus::Completed) {
                     return Ok(RunSnapshot::from_state(run_id.into(), &state));
                 }
@@ -509,15 +513,18 @@ impl<
                 flow.version = binding.flow.version.checked_add(1).ok_or_else(|| {
                     RecoveryError::new("FLOW_VERSION_INVALID", "flow version cannot be advanced")
                 })?;
-                self.flows
-                    .save_flow(&flow)
-                    .await
-                    .map_err(RecoveryError::from_port)?;
                 binding.flow = flow;
                 state
                     .apply_recovery(RecoveryAction::EditAndRetry)
                     .map_err(recovery_state_error)?;
-                self.persist_recovery(run_id, &state, &binding).await?;
+                self.apply_bound_recovery(
+                    run_id,
+                    &state,
+                    &paused_binding,
+                    &binding,
+                    Some(&binding.flow),
+                )
+                .await?;
                 let (mut source, mut target) = match self.open_bound_sessions(&binding).await {
                     Ok(sessions) => sessions,
                     Err(error) => {
@@ -763,6 +770,34 @@ impl<
             .await
             .map_err(RecoveryError::from_port)?;
         Ok(RunSnapshot::from_state(run_id.into(), state))
+    }
+
+    async fn apply_bound_recovery(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        expected_binding: &RunBinding,
+        persisted_binding: &RunBinding,
+        updated_flow: Option<&Flow>,
+    ) -> Result<(), RecoveryError> {
+        match self
+            .history
+            .apply_bound_recovery(
+                run_id,
+                state,
+                expected_binding,
+                persisted_binding,
+                updated_flow,
+            )
+            .await
+            .map_err(RecoveryError::from_port)?
+        {
+            BoundRecoveryApply::Applied => Ok(()),
+            BoundRecoveryApply::ConfigurationChanged => Err(RecoveryError::new(
+                "RECOVERY_CONFIG_MISMATCH",
+                "flow or connection configuration changed after the run paused",
+            )),
+        }
     }
 
     async fn persist_recovery_failure(

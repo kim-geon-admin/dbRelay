@@ -4,8 +4,8 @@ use db_relay::{
     application::{
         migration_runner::{MigrationRunner, RecoveryRequest},
         ports::{
-            Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession, PortError,
-            ResolvedSecret,
+            Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession, FlowRepository,
+            PortError, ResolvedSecret,
         },
     },
     domain::{
@@ -343,6 +343,69 @@ async fn recovery_rejects_a_flow_changed_after_the_run_paused() {
 }
 
 #[tokio::test]
+async fn recovery_rejects_profile_only_drift_before_target_activity() {
+    // Would fail if recovery compared only the flow and not its bound connection profiles.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    let operations_before_recovery = harness.target_operations();
+
+    let mut changed_target = harness.history.load_connection("target").unwrap();
+    changed_target.host = "changed.internal".into();
+    harness.history.save_connection(&changed_target).unwrap();
+
+    let error = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::SkipAndContinue {
+                step_id: "address".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "RECOVERY_CONFIG_MISMATCH");
+    assert_eq!(harness.target_operations(), operations_before_recovery);
+}
+
+#[tokio::test]
+async fn recovery_rejects_a_change_that_interleaves_after_preliminary_validation() {
+    // Would fail if a config write could slip between validation and the recovery transition.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    let operations_before_recovery = harness.target_operations();
+    let mut changed_flow = harness.history.load_flow(&harness.flow_id).unwrap();
+    changed_flow.query_steps[0].upsert_sql = "merge raced_customer using dual on (id = :ID)".into();
+    changed_flow.version += 1;
+    let flows = Arc::new(InterleavingFlowRepository::after_target_profile_read(
+        harness.history.clone(),
+        changed_flow,
+    ));
+    let runner = MigrationRunner::new(
+        harness.connector.clone(),
+        flows,
+        harness.history.clone(),
+        harness.credentials.clone(),
+        Arc::new(FixedClock),
+    );
+
+    let error = runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::SkipAndContinue {
+                step_id: "address".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "RECOVERY_CONFIG_MISMATCH");
+    assert_eq!(harness.target_operations(), operations_before_recovery);
+}
+
+#[tokio::test]
 async fn stop_preserves_committed_steps_and_does_not_execute_later_steps() {
     // Would fail if stop continued the run after recording the user's decision.
     let harness =
@@ -446,6 +509,7 @@ struct RunnerHarness {
     flow_id: String,
     history: Arc<SqliteStore>,
     connector: Arc<RunnerConnectorFactory>,
+    credentials: Arc<MemoryCredentialStore>,
 }
 
 impl RunnerHarness {
@@ -493,7 +557,7 @@ impl RunnerHarness {
             connector.clone(),
             repository.clone(),
             repository.clone(),
-            credentials,
+            credentials.clone(),
             Arc::new(FixedClock),
         );
 
@@ -502,6 +566,7 @@ impl RunnerHarness {
             flow_id,
             history: repository,
             connector,
+            credentials,
         }
     }
 
@@ -534,6 +599,68 @@ impl RunnerHarness {
 
     fn target_operations(&self) -> Vec<String> {
         self.connector.target_operations()
+    }
+}
+
+struct InterleavingFlowRepository {
+    store: Arc<SqliteStore>,
+    flow_to_save: Mutex<Option<Flow>>,
+}
+
+impl InterleavingFlowRepository {
+    fn after_target_profile_read(store: Arc<SqliteStore>, flow_to_save: Flow) -> Self {
+        Self {
+            store,
+            flow_to_save: Mutex::new(Some(flow_to_save)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FlowRepository for InterleavingFlowRepository {
+    async fn load_flow(&self, flow_id: &str) -> Result<Option<Flow>, PortError> {
+        self.store.load_flow(flow_id).map(Some)
+    }
+
+    async fn save_flow(&self, flow: &Flow) -> Result<(), PortError> {
+        self.store.save_flow(flow)
+    }
+
+    async fn list_flows(&self) -> Result<Vec<Flow>, PortError> {
+        self.store.list_flows()
+    }
+
+    async fn load_connection(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<ConnectionProfile>, PortError> {
+        let profile = self.store.load_connection(connection_id)?;
+        if connection_id == "target" {
+            if let Some(flow) = self.flow_to_save.lock().unwrap().take() {
+                self.store.save_flow(&flow)?;
+            }
+        }
+        Ok(Some(profile))
+    }
+
+    async fn save_connection(&self, profile: &ConnectionProfile) -> Result<(), PortError> {
+        self.store.save_connection(profile)
+    }
+
+    async fn list_connections(&self) -> Result<Vec<ConnectionProfile>, PortError> {
+        self.store.list_connections()
+    }
+
+    async fn update_connection(&self, profile: &ConnectionProfile) -> Result<(), PortError> {
+        self.store.update_connection_without_credential(profile)
+    }
+
+    async fn disable_connection(&self, connection_id: &str) -> Result<(), PortError> {
+        self.store.disable_connection(connection_id)
+    }
+
+    async fn delete_connection(&self, connection_id: &str) -> Result<(), PortError> {
+        self.store.delete_connection(connection_id)
     }
 }
 

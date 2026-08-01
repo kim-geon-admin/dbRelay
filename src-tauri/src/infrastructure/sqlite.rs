@@ -8,7 +8,9 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    application::ports::{FlowRepository, HistoryRepository, PortError, RunBinding},
+    application::ports::{
+        BoundRecoveryApply, FlowRepository, HistoryRepository, PortError, RunBinding,
+    },
     domain::{
         ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
         RunStatus, StepStatus, TransactionPolicy,
@@ -429,29 +431,91 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            transaction.execute(
-                "INSERT INTO runs (id, state_json) VALUES (?1, ?2)
-                 ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json",
-                params![run_id, state_json],
+            write_stored_run(&transaction, run_id, state_json, &step_statuses, state)?;
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn apply_bound_recovery(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        expected_binding: &RunBinding,
+        persisted_binding: &RunBinding,
+        updated_flow: Option<&Flow>,
+    ) -> Result<BoundRecoveryApply, PortError> {
+        let stored_run = StoredRun::from_bound_state(state, persisted_binding);
+        let state_json = serde_json::to_string(&stored_run).map_err(|_| {
+            PortError::new("HISTORY_SERIALIZATION", "run history could not be saved")
+        })?;
+        let step_statuses = state
+            .steps()
+            .iter()
+            .enumerate()
+            .map(|(position, step)| {
+                serde_json::to_string(&step.status)
+                    .map(|status_json| (position, status_json))
+                    .map_err(|_| {
+                        PortError::new("HISTORY_SERIALIZATION", "run history could not be saved")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let flow_exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM flows WHERE id = ?1)",
+                [&expected_binding.flow.id],
+                |row| row.get(0),
             )?;
-            transaction.execute("DELETE FROM run_steps WHERE run_id = ?1", [run_id])?;
-            transaction.execute("DELETE FROM recovery_events WHERE run_id = ?1", [run_id])?;
-            for (position, status_json) in &step_statuses {
-                transaction.execute(
-                    "INSERT INTO run_steps (run_id, position, status_json) VALUES (?1, ?2, ?3)",
-                    params![run_id, *position as i64, status_json],
-                )?;
+            let current_flow = flow_exists
+                .then(|| load_flow_from_connection(&transaction, &expected_binding.flow.id))
+                .transpose()?;
+            let source_profile = load_connection_from_connection(
+                &transaction,
+                &expected_binding.source_profile.id,
+            )?;
+            let target_profile = load_connection_from_connection(
+                &transaction,
+                &expected_binding.target_profile.id,
+            )?;
+            if current_flow.as_ref() != Some(&expected_binding.flow)
+                || source_profile.as_ref() != Some(&expected_binding.source_profile)
+                || target_profile.as_ref() != Some(&expected_binding.target_profile)
+            {
+                return Ok(BoundRecoveryApply::ConfigurationChanged);
             }
-            for (sequence, event) in state.events().iter().enumerate() {
-                if let RunEvent::RecoveryApplied { step, action } = event {
+            if let Some(flow) = updated_flow {
+                transaction.execute(
+                    "INSERT INTO flows (id, name, source_connection_id, target_connection_id, transaction_policy, version)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        source_connection_id = excluded.source_connection_id,
+                        target_connection_id = excluded.target_connection_id,
+                        transaction_policy = excluded.transaction_policy,
+                        version = excluded.version",
+                    params![
+                        flow.id,
+                        flow.name,
+                        flow.source_connection_id,
+                        flow.target_connection_id,
+                        transaction_policy(flow.transaction_policy),
+                        flow.version,
+                    ],
+                )?;
+                transaction.execute("DELETE FROM query_steps WHERE flow_id = ?1", [&flow.id])?;
+                for (position, step) in flow.query_steps.iter().enumerate() {
                     transaction.execute(
-                        "INSERT INTO recovery_events (run_id, sequence, position, action) VALUES (?1, ?2, ?3, ?4)",
-                        params![run_id, sequence as i64, *step as i64, recovery_action(*action)],
+                        "INSERT INTO query_steps (flow_id, position, id, select_sql, upsert_sql)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![flow.id, position as i64, step.id, step.select_sql, step.upsert_sql],
                     )?;
                 }
             }
+            write_stored_run(&transaction, run_id, state_json, &step_statuses, state)?;
             transaction.commit()?;
-            Ok(())
+            Ok(BoundRecoveryApply::Applied)
         })
     }
 
@@ -648,6 +712,55 @@ impl HistoryRepository for SqliteStore {
     async fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError> {
         SqliteStore::load_run_binding(self, run_id)
     }
+
+    async fn apply_bound_recovery(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        expected_binding: &RunBinding,
+        persisted_binding: &RunBinding,
+        updated_flow: Option<&Flow>,
+    ) -> Result<BoundRecoveryApply, PortError> {
+        SqliteStore::apply_bound_recovery(
+            self,
+            run_id,
+            state,
+            expected_binding,
+            persisted_binding,
+            updated_flow,
+        )
+    }
+}
+
+fn write_stored_run(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    state_json: String,
+    step_statuses: &[(usize, String)],
+    state: &RunState,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO runs (id, state_json) VALUES (?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json",
+        params![run_id, state_json],
+    )?;
+    transaction.execute("DELETE FROM run_steps WHERE run_id = ?1", [run_id])?;
+    transaction.execute("DELETE FROM recovery_events WHERE run_id = ?1", [run_id])?;
+    for (position, status_json) in step_statuses {
+        transaction.execute(
+            "INSERT INTO run_steps (run_id, position, status_json) VALUES (?1, ?2, ?3)",
+            params![run_id, *position as i64, status_json],
+        )?;
+    }
+    for (sequence, event) in state.events().iter().enumerate() {
+        if let RunEvent::RecoveryApplied { step, action } = event {
+            transaction.execute(
+                "INSERT INTO recovery_events (run_id, sequence, position, action) VALUES (?1, ?2, ?3, ?4)",
+                params![run_id, sequence as i64, *step as i64, recovery_action(*action)],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn load_flow_from_connection(connection: &Connection, flow_id: &str) -> rusqlite::Result<Flow> {
@@ -688,6 +801,20 @@ fn load_flow_from_connection(connection: &Connection, flow_id: &str) -> rusqlite
         transaction_policy: parse_transaction_policy(&policy)?,
         version,
     })
+}
+
+fn load_connection_from_connection(
+    connection: &Connection,
+    connection_id: &str,
+) -> rusqlite::Result<Option<ConnectionProfile>> {
+    connection
+        .query_row(
+            "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled
+             FROM connection_profiles WHERE id = ?1",
+            [connection_id],
+            connection_from_row,
+        )
+        .optional()
 }
 
 fn connection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {

@@ -15,6 +15,12 @@ pub struct RunBinding {
     pub target_profile: ConnectionProfile,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundRecoveryApply {
+    Applied,
+    ConfigurationChanged,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PortError {
     code: String,
@@ -141,6 +147,14 @@ pub trait HistoryRepository: Send + Sync {
         binding: &RunBinding,
     ) -> Result<(), PortError>;
     async fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError>;
+    async fn apply_bound_recovery(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        expected_binding: &RunBinding,
+        persisted_binding: &RunBinding,
+        updated_flow: Option<&Flow>,
+    ) -> Result<BoundRecoveryApply, PortError>;
 }
 
 pub trait Clock: Send + Sync {
