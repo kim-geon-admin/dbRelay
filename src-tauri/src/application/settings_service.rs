@@ -14,6 +14,8 @@ pub struct SettingsService<R: FlowRepository + ?Sized, C: CredentialStore + ?Siz
     credentials: Arc<C>,
 }
 
+const UNAVAILABLE_KEYRING_PASSWORD_MASK: &str = "********";
+
 impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R, C> {
     pub fn new(repository: Arc<R>, credentials: Arc<C>) -> Self {
         Self {
@@ -148,10 +150,13 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
     }
 
     pub async fn password_mask(&self, profile: &ConnectionProfile) -> String {
-        self.resolve_credential(profile)
-            .await
-            .map(|secret| "*".repeat(secret.expose().chars().count()))
-            .unwrap_or_default()
+        match self.resolve_credential(profile).await {
+            Ok(secret) => "*".repeat(secret.expose().chars().count()),
+            Err(_) if profile.credential_storage == CredentialStorage::Keyring => {
+                UNAVAILABLE_KEYRING_PASSWORD_MASK.into()
+            }
+            Err(_) => String::new(),
+        }
     }
 
     pub async fn disable_connection(&self, connection_id: &str) -> Result<(), PortError> {

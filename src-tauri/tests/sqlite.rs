@@ -397,6 +397,18 @@ async fn keyring_credentials_are_projected_as_same_length_asterisks() {
     assert_eq!(service.password_mask(&saved).await, "********");
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn unavailable_keyring_credentials_still_have_a_visible_password_mask() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let profile = profile("source", "missing-keyring-entry");
+    store.save_connection(&profile).unwrap();
+
+    let service = SettingsService::new(store, Arc::new(RecordingCredentialStore::default()));
+
+    assert_eq!(service.password_mask(&profile).await, "********");
+}
+
 #[test]
 fn query_steps_round_trip_in_their_saved_order() {
     let store = SqliteStore::in_memory().unwrap();
