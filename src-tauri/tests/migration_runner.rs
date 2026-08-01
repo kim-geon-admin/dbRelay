@@ -9,7 +9,7 @@ use db_relay::{
         },
     },
     domain::{
-        ConnectionProfile, DbKind, Flow, NamedRow, QueryStep, RecoveryAction, RowSet, RunError,
+        ConnectionProfile, CredentialStorage, DbKind, Flow, NamedRow, QueryStep, RecoveryAction, RowSet, RunError,
         RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy, Value,
     },
     infrastructure::sqlite::SqliteStore,
@@ -64,6 +64,8 @@ async fn factory_sessions_are_isolated_while_the_observer_keeps_each_open_log() 
         service_name: "XE".into(),
         username: "scott".into(),
         credential_ref: "credential://source".into(),
+        credential_storage: CredentialStorage::Keyring,
+        plaintext_password: None,
         enabled: true,
         source_read_only: true,
     };
@@ -1122,6 +1124,8 @@ fn connection_profile(id: &str, credential_ref: &str) -> ConnectionProfile {
         service_name: "XE".into(),
         username: "relay".into(),
         credential_ref: credential_ref.into(),
+        credential_storage: CredentialStorage::Keyring,
+        plaintext_password: None,
         enabled: true,
         source_read_only: true,
     }

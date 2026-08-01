@@ -8,6 +8,13 @@ pub enum DbKind {
     Oracle,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStorage {
+    Keyring,
+    Plaintext,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConnectionProfile {
     pub id: String,
@@ -18,11 +25,19 @@ pub struct ConnectionProfile {
     pub service_name: String,
     pub username: String,
     pub credential_ref: String,
+    #[serde(default = "default_credential_storage")]
+    pub credential_storage: CredentialStorage,
+    #[serde(default)]
+    pub plaintext_password: Option<String>,
     pub enabled: bool,
     /// Operator attestation that this connection uses an Oracle principal
     /// restricted to read-only access when it is selected as a flow source.
     #[serde(default)]
     pub source_read_only: bool,
+}
+
+fn default_credential_storage() -> CredentialStorage {
+    CredentialStorage::Keyring
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -1,6 +1,6 @@
 use db_relay::{
     connectors::{ConnectorRegistry, OracleConnector},
-    domain::{ConnectionProfile, DbKind, NamedRow, OracleDate, OracleTimestamp, Row, Value},
+    domain::{ConnectionProfile, CredentialStorage, DbKind, NamedRow, OracleDate, OracleTimestamp, Row, Value},
 };
 use std::collections::BTreeMap;
 
@@ -337,6 +337,8 @@ fn profile() -> ConnectionProfile {
         service_name: "FREEPDB1".into(),
         username: "relay".into(),
         credential_ref: "credential://oracle-test".into(),
+        credential_storage: CredentialStorage::Keyring,
+        plaintext_password: None,
         enabled: true,
         source_read_only: true,
     }
@@ -375,6 +377,8 @@ fn oracle_test_connection() -> Option<(ConnectionProfile, String)> {
             service_name: service_name.into(),
             username: username.into(),
             credential_ref: "credential://oracle-integration".into(),
+            credential_storage: CredentialStorage::Keyring,
+            plaintext_password: None,
             enabled: true,
             source_read_only: true,
         },

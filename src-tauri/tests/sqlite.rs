@@ -12,8 +12,8 @@ use db_relay::{
         settings_service::SettingsService,
     },
     domain::{
-        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
-        RunStatus, TransactionPolicy,
+        ConnectionProfile, CredentialStorage, DbKind, Flow, QueryStep, RecoveryAction, RunError,
+        RunEvent, RunState, RunStatus, TransactionPolicy,
     },
     infrastructure::sqlite::SqliteStore,
 };
@@ -252,6 +252,8 @@ fn profile(id: &str, credential_ref: &str) -> ConnectionProfile {
         service_name: "XE".into(),
         username: "relay".into(),
         credential_ref: credential_ref.into(),
+        credential_storage: CredentialStorage::Keyring,
+        plaintext_password: None,
         enabled: true,
         source_read_only: true,
     }
@@ -313,6 +315,25 @@ fn listing_connections_returns_the_source_read_only_attestation() {
 
     assert_eq!(connections.len(), 1);
     assert!(!connections[0].source_read_only);
+}
+
+#[test]
+fn plaintext_connection_round_trips_its_explicit_password() {
+    let store = SqliteStore::in_memory().unwrap();
+    let profile = ConnectionProfile {
+        credential_storage: CredentialStorage::Plaintext,
+        plaintext_password: Some("visible-password".into()),
+        ..profile("source", "unused")
+    };
+    store.save_connection(&profile).unwrap();
+
+    let loaded = store.load_connection("source").unwrap();
+
+    assert_eq!(loaded.credential_storage, CredentialStorage::Plaintext);
+    assert_eq!(
+        loaded.plaintext_password.as_deref(),
+        Some("visible-password")
+    );
 }
 
 #[test]

@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::{
     application::{ports::ResolvedSecret, settings_service::SettingsService},
-    domain::{ConnectionProfile, DbKind},
+    domain::{ConnectionProfile, CredentialStorage, DbKind},
 };
 
 use super::{ApplicationContainer, CommandErrorDto};
@@ -223,6 +223,8 @@ impl ConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: self.id.clone(),
+            credential_storage: CredentialStorage::Keyring,
+            plaintext_password: None,
             enabled: true,
             source_read_only: self.source_read_only,
         })
@@ -248,6 +250,8 @@ impl UpdateConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: String::new(),
+            credential_storage: CredentialStorage::Keyring,
+            plaintext_password: None,
             enabled: self.enabled,
             source_read_only: self.source_read_only,
         })

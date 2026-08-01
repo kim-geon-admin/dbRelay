@@ -14,7 +14,7 @@ use crate::{
         RunHistoryEntry,
     },
     domain::{
-        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
+        ConnectionProfile, CredentialStorage, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
         RunStatus, StepStatus, TransactionPolicy,
     },
 };
@@ -308,6 +308,8 @@ impl SqliteStore {
                     service_name TEXT NOT NULL,
                     username TEXT NOT NULL,
                     credential_ref TEXT NOT NULL,
+                    credential_storage TEXT NOT NULL DEFAULT 'keyring',
+                    plaintext_password TEXT,
                     enabled INTEGER NOT NULL,
                     source_read_only INTEGER NOT NULL DEFAULT 0
                 );
@@ -361,8 +363,8 @@ impl SqliteStore {
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO connection_profiles
-                    (id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    (id, display_name, kind, host, port, service_name, username, credential_ref, credential_storage, plaintext_password, enabled, source_read_only)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id) DO UPDATE SET
                     display_name = excluded.display_name,
                     kind = excluded.kind,
@@ -371,6 +373,8 @@ impl SqliteStore {
                     service_name = excluded.service_name,
                     username = excluded.username,
                     credential_ref = excluded.credential_ref,
+                    credential_storage = excluded.credential_storage,
+                    plaintext_password = excluded.plaintext_password,
                     enabled = excluded.enabled,
                     source_read_only = excluded.source_read_only",
                 params![
@@ -382,6 +386,8 @@ impl SqliteStore {
                     profile.service_name,
                     profile.username,
                     profile.credential_ref,
+                    credential_storage(profile.credential_storage),
+                    profile.plaintext_password,
                     profile.enabled as i64,
                     profile.source_read_only as i64,
                 ],
@@ -422,7 +428,7 @@ impl SqliteStore {
     pub fn list_connections(&self) -> Result<Vec<ConnectionProfile>, PortError> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only
+                "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, credential_storage, plaintext_password, enabled, source_read_only
                  FROM connection_profiles ORDER BY display_name, id",
             )?;
             let profiles = statement
@@ -940,7 +946,7 @@ impl SqliteStore {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only
+                    "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, credential_storage, plaintext_password, enabled, source_read_only
                      FROM connection_profiles WHERE id = ?1",
                     [connection_id],
                     connection_from_row,
@@ -1242,7 +1248,7 @@ fn load_connection_from_connection(
 ) -> rusqlite::Result<Option<ConnectionProfile>> {
     connection
         .query_row(
-            "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only
+            "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, credential_storage, plaintext_password, enabled, source_read_only
              FROM connection_profiles WHERE id = ?1",
             [connection_id],
             connection_from_row,
@@ -1260,8 +1266,10 @@ fn connection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionPr
         service_name: row.get(5)?,
         username: row.get(6)?,
         credential_ref: row.get(7)?,
-        enabled: row.get(8)?,
-        source_read_only: row.get(9)?,
+        credential_storage: parse_credential_storage(&row.get::<_, String>(8)?)?,
+        plaintext_password: row.get(9)?,
+        enabled: row.get(10)?,
+        source_read_only: row.get(11)?,
     })
 }
 
@@ -1274,6 +1282,21 @@ fn db_kind(kind: DbKind) -> &'static str {
 fn parse_db_kind(value: &str) -> rusqlite::Result<DbKind> {
     match value {
         "oracle" => Ok(DbKind::Oracle),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn credential_storage(storage: CredentialStorage) -> &'static str {
+    match storage {
+        CredentialStorage::Keyring => "keyring",
+        CredentialStorage::Plaintext => "plaintext",
+    }
+}
+
+fn parse_credential_storage(value: &str) -> rusqlite::Result<CredentialStorage> {
+    match value {
+        "keyring" => Ok(CredentialStorage::Keyring),
+        "plaintext" => Ok(CredentialStorage::Plaintext),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -1391,6 +1414,18 @@ fn migrate_run_history_columns(connection: &mut Connection) -> rusqlite::Result<
     if !table_has_column(connection, "connection_profiles", "source_read_only")? {
         connection.execute(
             "ALTER TABLE connection_profiles ADD COLUMN source_read_only INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "connection_profiles", "credential_storage")? {
+        connection.execute(
+            "ALTER TABLE connection_profiles ADD COLUMN credential_storage TEXT NOT NULL DEFAULT 'keyring'",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "connection_profiles", "plaintext_password")? {
+        connection.execute(
+            "ALTER TABLE connection_profiles ADD COLUMN plaintext_password TEXT",
             [],
         )?;
     }

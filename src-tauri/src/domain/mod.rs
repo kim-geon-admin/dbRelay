@@ -10,7 +10,7 @@ pub use mapping::{
     validate_source_statement, validate_target_statement,
 };
 pub use model::{
-    ConnectionProfile, DbKind, Flow, MappingError, NamedRow, OracleDate, OracleTimestamp,
+    ConnectionProfile, CredentialStorage, DbKind, Flow, MappingError, NamedRow, OracleDate, OracleTimestamp,
     QueryStep, Row, RowSet, TransactionPolicy, ValidationError, Value,
 };
 pub use run_state::{

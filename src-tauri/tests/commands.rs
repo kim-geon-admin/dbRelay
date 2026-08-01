@@ -3,7 +3,7 @@ use db_relay::{
         ConnectionRequest, ConnectionResponse, FlowRequest, QueryStepRequest, RunHistoryResponse,
         UpdateConnectionRequest,
     },
-    domain::{ConnectionProfile, DbKind, RunEvent, RunStatus, StepStatus, TransactionPolicy},
+    domain::{ConnectionProfile, CredentialStorage, DbKind, RunEvent, RunStatus, StepStatus, TransactionPolicy},
 };
 
 fn profile_with_secret_reference() -> ConnectionProfile {
@@ -16,6 +16,8 @@ fn profile_with_secret_reference() -> ConnectionProfile {
         service_name: "ORCLPDB1".into(),
         username: "relay".into(),
         credential_ref: "keyring://production-password".into(),
+        credential_storage: CredentialStorage::Keyring,
+        plaintext_password: None,
         enabled: true,
         source_read_only: true,
     }
