@@ -6,4 +6,4 @@ Each flow references a source and target connection setting, an ordered list of 
 
 `all_or_nothing` performs every target change in one transaction and rolls back all changes if a step fails. `commit_successes` commits successful steps independently, then pauses after a failed step for one explicit action: edit and retry, skip and continue, or stop.
 
-Execution history records safe status, timing, counts, native error context, and recovery choices. It never stores or displays bind values or source rows. Connection editing displays a password only when the operator explicitly selects plaintext password storage; encrypted storage remains the default.
+Execution history records safe status, timing, counts, native error context, and recovery choices. It never stores or displays credentials, bind values, or source rows. Connection editing displays only `*` characters matching a saved password's length; encrypted storage is always used.

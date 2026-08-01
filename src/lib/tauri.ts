@@ -4,7 +4,7 @@ export type CommandError = { title: string; detail: string; code: string; runId?
 
 type ConnectionDto = {
   id: string; displayName: string; kind: "oracle"; host: string; port: number;
-  serviceName: string; username: string; credentialStorage: "keyring" | "plaintext"; password?: string; enabled: boolean;
+  serviceName: string; username: string; passwordMask: string; enabled: boolean;
 };
 type FlowDto = {
   id: string; name: string; sourceConnectionId: string; targetConnectionId: string;
@@ -40,8 +40,8 @@ type RecoverRunRequestDto =
 
 type CommandRequestMap = {
   list_connections: undefined;
-  save_connection: { request: Omit<ConnectionDto, "enabled" | "password"> & { secret: string } };
-  update_connection: { request: Omit<ConnectionDto, "password"> & { replacementSecret?: string } };
+  save_connection: { request: Omit<ConnectionDto, "enabled" | "passwordMask"> & { secret: string } };
+  update_connection: { request: Omit<ConnectionDto, "passwordMask"> & { replacementSecret?: string } };
   disable_connection: { request: { connectionId: string } };
   test_connection: { request: { connectionId: string } };
   list_flows: undefined;

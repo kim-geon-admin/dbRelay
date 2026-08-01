@@ -21,8 +21,6 @@ pub struct ConnectionRequest {
     pub service_name: String,
     pub username: String,
     #[serde(default)]
-    pub credential_storage: CredentialStorage,
-    #[serde(default)]
     pub source_read_only: bool,
     pub secret: String,
 }
@@ -37,8 +35,6 @@ pub struct UpdateConnectionRequest {
     pub port: u16,
     pub service_name: String,
     pub username: String,
-    #[serde(default)]
-    pub credential_storage: CredentialStorage,
     #[serde(default)]
     pub source_read_only: bool,
     pub enabled: bool,
@@ -97,9 +93,7 @@ pub struct ConnectionResponse {
     pub port: u16,
     pub service_name: String,
     pub username: String,
-    pub credential_storage: CredentialStorage,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
+    pub password_mask: String,
     pub source_read_only: bool,
     pub enabled: bool,
 }
@@ -114,10 +108,7 @@ impl From<ConnectionProfile> for ConnectionResponse {
             port: profile.port,
             service_name: profile.service_name,
             username: profile.username,
-            credential_storage: profile.credential_storage,
-            password: (profile.credential_storage == CredentialStorage::Plaintext)
-                .then_some(profile.plaintext_password)
-                .flatten(),
+            password_mask: String::new(),
             source_read_only: profile.source_read_only,
             enabled: profile.enabled,
         }
@@ -135,11 +126,18 @@ pub struct TestConnectionResponse {
 pub async fn list_connections(
     state: State<'_, ApplicationContainer>,
 ) -> Result<Vec<ConnectionResponse>, CommandErrorDto> {
-    SettingsService::new(state.repository.clone(), state.credentials.clone())
+    let service = SettingsService::new(state.repository.clone(), state.credentials.clone());
+    let profiles = service
         .list_connections()
         .await
-        .map(|profiles| profiles.into_iter().map(ConnectionResponse::from).collect())
-        .map_err(CommandErrorDto::from_port)
+        .map_err(CommandErrorDto::from_port)?;
+    let mut responses = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        let mut response = ConnectionResponse::from(profile.clone());
+        response.password_mask = service.password_mask(&profile).await;
+        responses.push(response);
+    }
+    Ok(responses)
 }
 
 #[tauri::command]
@@ -236,9 +234,8 @@ impl ConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: self.id.clone(),
-            credential_storage: self.credential_storage,
-            plaintext_password: (self.credential_storage == CredentialStorage::Plaintext)
-                .then_some(self.secret.clone()),
+            credential_storage: CredentialStorage::Keyring,
+            plaintext_password: None,
             enabled: true,
             source_read_only: self.source_read_only,
         })
@@ -264,10 +261,8 @@ impl UpdateConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: String::new(),
-            credential_storage: self.credential_storage,
-            plaintext_password: (self.credential_storage == CredentialStorage::Plaintext)
-                .then_some(self.replacement_secret.clone())
-                .flatten(),
+            credential_storage: CredentialStorage::Keyring,
+            plaintext_password: None,
             enabled: self.enabled,
             source_read_only: self.source_read_only,
         })

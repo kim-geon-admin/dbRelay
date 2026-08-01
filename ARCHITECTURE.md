@@ -19,7 +19,7 @@ React UI -> Tauri command DTOs -> application services -> domain ports
 
 ## Boundary Rules
 
-By default, credentials reside in Windows Credential Manager and SQLite stores only references and metadata. An operator can explicitly choose plaintext password storage; only then does SQLite store and the connection command DTO return a password. Commands never return passwords for keyring connections, or SQL text, bind values, source rows, or execution credentials through run history. Run-history persistence stores a safe recovery binding (flow ID/version, connection IDs, and non-secret configuration fingerprints), then reloads and verifies the live flow/profile before recovery rather than serializing the executable flow or credential references.
+Credentials reside in Windows Credential Manager and SQLite stores only references and metadata. Connection commands expose an asterisk mask matching a saved password's length, never the raw password. Commands never return passwords, SQL text, bind values, source rows, or execution credentials through run history. Run-history persistence stores a safe recovery binding (flow ID/version, connection IDs, and non-secret configuration fingerprints), then reloads and verifies the live flow/profile before recovery rather than serializing the executable flow or credential references.
 
 The Oracle connector maps `DATE` and timezone-free `TIMESTAMP` into structured domain values and uses oracle-rs typed batch binds. Capability preflight rejects ambiguous textual timestamps and timestamps with timezone offsets before target `begin`, because oracle-rs 0.1.7 writes those batch binds as plain timestamps.
 

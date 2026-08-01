@@ -64,7 +64,6 @@ impl RecordingCredentialStore {
             .expect("recording credential store lock poisoned")
             .clone()
     }
-
 }
 
 #[cfg(feature = "test-support")]
@@ -372,9 +371,30 @@ async fn saving_a_plaintext_connection_does_not_write_to_the_keyring() {
 
     assert!(credentials.stored_connection_ids().is_empty());
     assert_eq!(
-        store.load_connection("source").unwrap().plaintext_password.as_deref(),
+        store
+            .load_connection("source")
+            .unwrap()
+            .plaintext_password
+            .as_deref(),
         Some("visible-password")
     );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn keyring_credentials_are_projected_as_same_length_asterisks() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let credentials = Arc::new(RecordingCredentialStore::default());
+    let service = SettingsService::new(store.clone(), credentials);
+    let profile = profile("source", "unused");
+
+    service
+        .save_connection(&profile, ResolvedSecret::for_test("eight123"))
+        .await
+        .unwrap();
+    let saved = store.load_connection("source").unwrap();
+
+    assert_eq!(service.password_mask(&saved).await, "********");
 }
 
 #[test]

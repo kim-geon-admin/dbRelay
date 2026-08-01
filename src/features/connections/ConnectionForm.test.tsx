@@ -17,10 +17,13 @@ it("does not submit a connection with an empty service name", () => {
   expect(onSave).not.toHaveBeenCalled();
 });
 
-it("defaults to encrypted storage and removes the legacy connection controls", () => {
-  render(<ConnectionForm onSave={vi.fn()} />);
+it("shows a saved password as stars without a checkbox", () => {
+  render(<ConnectionForm connection={{
+    id: "production", displayName: "Production", kind: "oracle", host: "db.example.test", port: 1521,
+    serviceName: "ORCLPDB1", username: "relay", credentialStorage: "keyring", passwordMask: "********", enabled: true,
+  } as never} onSave={vi.fn()} />);
 
-  expect(screen.getByLabelText("Encrypt password storage")).toBeChecked();
+  expect(screen.getByLabelText("Password")).toHaveValue("********");
+  expect(screen.queryByLabelText("Encrypt password storage")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Source account is read-only")).not.toBeInTheDocument();
-  expect(screen.queryByText("leave blank to keep existing")).not.toBeInTheDocument();
 });

@@ -1,6 +1,4 @@
 export type DbKind = "oracle";
-export type CredentialStorage = "keyring" | "plaintext";
-
 export type Connection = {
   id: string;
   displayName: string;
@@ -9,12 +7,11 @@ export type Connection = {
   port: number;
   serviceName: string;
   username: string;
-  credentialStorage: CredentialStorage;
-  password?: string;
+  passwordMask: string;
   enabled: boolean;
 };
 
-export type ConnectionSaveInput = Omit<Connection, "enabled"> & {
+export type ConnectionSaveInput = Omit<Connection, "enabled" | "passwordMask"> & {
   enabled?: boolean;
   password?: string;
 };

@@ -147,6 +147,13 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
         self.repository.list_connections().await
     }
 
+    pub async fn password_mask(&self, profile: &ConnectionProfile) -> String {
+        self.resolve_credential(profile)
+            .await
+            .map(|secret| "*".repeat(secret.expose().chars().count()))
+            .unwrap_or_default()
+    }
+
     pub async fn disable_connection(&self, connection_id: &str) -> Result<(), PortError> {
         self.repository.disable_connection(connection_id).await
     }
@@ -161,10 +168,7 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
                 .clone()
                 .map(ResolvedSecret::new)
                 .ok_or_else(|| {
-                    PortError::new(
-                        "CREDENTIAL_NOT_FOUND",
-                        "plaintext password was not found",
-                    )
+                    PortError::new("CREDENTIAL_NOT_FOUND", "plaintext password was not found")
                 });
         }
         match self.credentials.resolve(&profile.credential_ref).await {

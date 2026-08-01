@@ -25,7 +25,7 @@ pnpm tauri build
 
 ## Credentials and local data
 
-Connection metadata and flow definitions are stored locally in SQLite. Password encryption is selected per connection: **Encrypt password storage** (the default) stores the password in Windows Credential Manager, while clearing it deliberately stores the password as plaintext in SQLite and displays it again when that connection is edited. Protect the Windows account and application-data directory when choosing plaintext storage. SQL text, bind values, source rows, and execution-history diagnostics are never returned by the command API or recorded in run history.
+Connection metadata and flow definitions are stored locally in SQLite. Passwords are stored in Windows Credential Manager under the stable connection ID; SQLite stores only the credential reference. When editing a saved connection, the password field displays `*` characters matching the password length, never the password itself. SQL text, bind values, source rows, and execution-history diagnostics are never returned by the command API or recorded in run history.
 
 Oracle `DATE` and timezone-free `TIMESTAMP` source values are carried as typed Oracle binds. Ambiguous textual timestamps and timestamps with an offset are rejected during preflight before a target transaction opens; `oracle-rs` 0.1.7 batch binding does not preserve the latter's timezone representation.
 
