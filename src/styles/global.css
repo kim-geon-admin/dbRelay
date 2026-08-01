@@ -1,0 +1,225 @@
+@import "./tokens.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-coral) 55%, transparent);
+  outline-offset: 3px;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.app-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+  padding: var(--space-6) var(--space-4);
+  background: var(--color-dark);
+  color: var(--color-on-dark);
+}
+
+.app-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: inherit;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  letter-spacing: -0.03em;
+  text-decoration: none;
+}
+
+.app-brand__mark {
+  color: var(--color-coral);
+  font-family: var(--font-code);
+  font-size: 1.15rem;
+}
+
+.app-navigation {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.app-navigation__link {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--color-on-dark-muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.app-navigation__link:hover,
+.app-navigation__link[aria-current="page"] {
+  background: var(--color-dark-elevated);
+  color: var(--color-on-dark);
+}
+
+.app-navigation__link[aria-current="page"]::before {
+  width: 3px;
+  height: 18px;
+  margin-right: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-coral);
+  content: "";
+}
+
+.app-content {
+  min-width: 0;
+  padding: clamp(var(--space-5), 5vw, var(--space-7));
+}
+
+.app-page {
+  width: min(100%, 1120px);
+  margin: 0 auto;
+}
+
+.app-page__eyebrow {
+  margin: 0 0 var(--space-2);
+  color: var(--color-coral-active);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.app-page__title {
+  max-width: 16ch;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(2.25rem, 5vw, 3.5rem);
+  font-weight: 400;
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+}
+
+.app-page__description {
+  max-width: 60ch;
+  margin: var(--space-3) 0 0;
+  color: var(--color-body);
+}
+
+.app-page__placeholder {
+  margin-top: var(--space-6);
+  padding: var(--space-6);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+  color: var(--color-muted);
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--color-card);
+  color: var(--color-ink);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.status-badge::before {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.status-badge--success { color: var(--color-success); }
+.status-badge--warning { color: var(--color-warning); }
+.status-badge--error { color: var(--color-error); }
+.status-badge--neutral { color: var(--color-muted); }
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  max-width: 440px;
+  padding: var(--space-4);
+  border: 1px solid var(--color-hairline);
+  border-left: 4px solid var(--color-muted);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas);
+  box-shadow: 0 1px 3px rgb(20 20 19 / 8%);
+}
+
+.toast--success { border-left-color: var(--color-success); }
+.toast--warning { border-left-color: var(--color-warning); }
+.toast--error { border-left-color: var(--color-error); }
+
+.toast__title {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.toast__message {
+  margin: var(--space-1) 0 0;
+  color: var(--color-body);
+  font-size: 0.875rem;
+}
+
+@media (max-width: 767px) {
+  .app-shell {
+    display: block;
+  }
+
+  .app-sidebar {
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .app-navigation {
+    display: flex;
+    gap: var(--space-2);
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .app-navigation__link {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 8px var(--space-3);
+  }
+
+  .app-navigation__link[aria-current="page"]::before {
+    display: none;
+  }
+
+  .app-content {
+    padding: var(--space-5) var(--space-4);
+  }
+}
