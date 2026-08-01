@@ -14,8 +14,12 @@ impl<R: FlowRepository + ?Sized> FlowService<R> {
         Self { repository }
     }
 
-    pub async fn save_flow(&self, flow: &Flow) -> Result<(), PortError> {
-        self.repository.save_flow(flow).await
+    pub async fn save_flow(&self, flow: &Flow) -> Result<Flow, PortError> {
+        self.repository.save_flow(flow).await?;
+        self.repository
+            .load_flow(&flow.id)
+            .await?
+            .ok_or_else(|| PortError::new("FLOW_NOT_FOUND", "flow could not be reloaded"))
     }
 
     pub async fn list_flows(&self) -> Result<Vec<Flow>, PortError> {
@@ -40,7 +44,6 @@ impl<R: FlowRepository + ?Sized> FlowService<R> {
             .ok_or_else(|| PortError::new("FLOW_NOT_FOUND", "flow not found"))?;
         duplicate.id = duplicate_id.into();
         duplicate.name = format!("{} copy", duplicate.name);
-        self.repository.save_flow(&duplicate).await?;
-        Ok(duplicate)
+        self.save_flow(&duplicate).await
     }
 }

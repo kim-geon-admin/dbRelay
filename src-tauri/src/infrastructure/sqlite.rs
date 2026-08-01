@@ -399,35 +399,52 @@ impl SqliteStore {
     }
 
     pub fn save_flow(&self, flow: &Flow) -> Result<(), PortError> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            transaction.execute(
-                "INSERT INTO flows (id, name, source_connection_id, target_connection_id, transaction_policy, version)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    source_connection_id = excluded.source_connection_id,
-                    target_connection_id = excluded.target_connection_id,
-                    transaction_policy = excluded.transaction_policy,
-                    version = excluded.version",
-                params![
-                    flow.id,
-                    flow.name,
-                    flow.source_connection_id,
-                    flow.target_connection_id,
-                    transaction_policy(flow.transaction_policy),
-                    flow.version,
-                ],
-            )?;
-            transaction.execute("DELETE FROM query_steps WHERE flow_id = ?1", [&flow.id])?;
-            for (position, step) in flow.query_steps.iter().enumerate() {
-                transaction.execute(
-                    "INSERT INTO query_steps (flow_id, position, id, select_sql, upsert_sql)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![flow.id, position as i64, step.id, step.select_sql, step.upsert_sql],
-                )?;
-            }
-            transaction.commit()?;
+        self.with_connection_port(|connection| {
+            let transaction = connection.transaction().map_err(sqlite_error)?;
+            let current_version = transaction
+                .query_row("SELECT version FROM flows WHERE id = ?1", [&flow.id], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .optional()
+                .map_err(sqlite_error)?;
+            let next_version = match current_version {
+                // The command path supplies the currently observed version;
+                // older in-process recovery callers supplied the next one.
+                // Both remain monotonic and are protected by this transaction.
+                Some(version) if version == flow.version => version.checked_add(1).ok_or_else(|| {
+                    PortError::new("FLOW_VERSION_INVALID", "flow version cannot be advanced")
+                })?,
+                Some(version) if flow.version == version.saturating_add(1) => flow.version,
+                Some(_) => {
+                    return Err(PortError::new(
+                        "FLOW_VERSION_CONFLICT",
+                        "flow was changed by another save",
+                    ))
+                }
+                None => 1,
+            };
+            transaction
+                .execute(
+                    "INSERT INTO flows (id, name, source_connection_id, target_connection_id, transaction_policy, version)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        source_connection_id = excluded.source_connection_id,
+                        target_connection_id = excluded.target_connection_id,
+                        transaction_policy = excluded.transaction_policy,
+                        version = excluded.version",
+                    params![
+                        flow.id,
+                        flow.name,
+                        flow.source_connection_id,
+                        flow.target_connection_id,
+                        transaction_policy(flow.transaction_policy),
+                        next_version,
+                    ],
+                )
+                .map_err(sqlite_error)?;
+            replace_flow_steps(&transaction, flow).map_err(sqlite_error)?;
+            transaction.commit().map_err(sqlite_error)?;
             Ok(())
         })
     }
@@ -465,6 +482,19 @@ impl SqliteStore {
         self.append_stored_run(run_id, state, StoredRun::from_bound_state(state, binding))
     }
 
+    pub fn create_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
+        self.create_stored_run(run_id, state, StoredRun::from_state(state))
+    }
+
+    pub fn create_bound_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<(), PortError> {
+        self.create_stored_run(run_id, state, StoredRun::from_bound_state(state, binding))
+    }
+
     fn append_stored_run(
         &self,
         run_id: &str,
@@ -488,8 +518,51 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            write_stored_run(&transaction, run_id, state_json, &step_statuses, state)?;
+            write_stored_run(
+                &transaction,
+                run_id,
+                state_json,
+                &step_statuses,
+                state,
+                false,
+            )?;
             transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    fn create_stored_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        stored_run: StoredRun,
+    ) -> Result<(), PortError> {
+        let (state_json, step_statuses) = serialize_stored_run(state, stored_run)?;
+        self.with_connection_port(|connection| {
+            let transaction = connection.transaction().map_err(sqlite_error)?;
+            let exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1)",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite_error)?;
+            if exists {
+                return Err(PortError::new(
+                    "RUN_ID_COLLISION",
+                    "run ID is already in use",
+                ));
+            }
+            write_stored_run(
+                &transaction,
+                run_id,
+                state_json,
+                &step_statuses,
+                state,
+                true,
+            )
+            .map_err(sqlite_error)?;
+            transaction.commit().map_err(sqlite_error)?;
             Ok(())
         })
     }
@@ -520,7 +593,8 @@ impl SqliteStore {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current_run_json: Option<String> = transaction
                 .query_row(
                     "SELECT state_json FROM runs WHERE id = ?1",
@@ -552,14 +626,10 @@ impl SqliteStore {
             let current_flow = flow_exists
                 .then(|| load_flow_from_connection(&transaction, &expected_binding.flow.id))
                 .transpose()?;
-            let source_profile = load_connection_from_connection(
-                &transaction,
-                &expected_binding.source_profile.id,
-            )?;
-            let target_profile = load_connection_from_connection(
-                &transaction,
-                &expected_binding.target_profile.id,
-            )?;
+            let source_profile =
+                load_connection_from_connection(&transaction, &expected_binding.source_profile.id)?;
+            let target_profile =
+                load_connection_from_connection(&transaction, &expected_binding.target_profile.id)?;
             if current_flow.as_ref() != Some(&expected_binding.flow)
                 || source_profile.as_ref() != Some(&expected_binding.source_profile)
                 || target_profile.as_ref() != Some(&expected_binding.target_profile)
@@ -567,15 +637,17 @@ impl SqliteStore {
                 return Ok(BoundRecoveryApply::ConfigurationChanged);
             }
             if let Some(flow) = updated_flow {
-                transaction.execute(
-                    "INSERT INTO flows (id, name, source_connection_id, target_connection_id, transaction_policy, version)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(id) DO UPDATE SET
-                        name = excluded.name,
-                        source_connection_id = excluded.source_connection_id,
-                        target_connection_id = excluded.target_connection_id,
-                        transaction_policy = excluded.transaction_policy,
-                        version = excluded.version",
+                if flow.version != expected_binding.flow.version.saturating_add(1) {
+                    return Ok(BoundRecoveryApply::ConfigurationChanged);
+                }
+                let changed = transaction.execute(
+                    "UPDATE flows SET
+                        name = ?2,
+                        source_connection_id = ?3,
+                        target_connection_id = ?4,
+                        transaction_policy = ?5,
+                        version = ?6
+                     WHERE id = ?1 AND version = ?7",
                     params![
                         flow.id,
                         flow.name,
@@ -583,18 +655,22 @@ impl SqliteStore {
                         flow.target_connection_id,
                         transaction_policy(flow.transaction_policy),
                         flow.version,
+                        expected_binding.flow.version,
                     ],
                 )?;
-                transaction.execute("DELETE FROM query_steps WHERE flow_id = ?1", [&flow.id])?;
-                for (position, step) in flow.query_steps.iter().enumerate() {
-                    transaction.execute(
-                        "INSERT INTO query_steps (flow_id, position, id, select_sql, upsert_sql)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![flow.id, position as i64, step.id, step.select_sql, step.upsert_sql],
-                    )?;
+                if changed != 1 {
+                    return Ok(BoundRecoveryApply::ConfigurationChanged);
                 }
+                replace_flow_steps(&transaction, flow)?;
             }
-            write_stored_run(&transaction, run_id, state_json, &step_statuses, state)?;
+            write_stored_run(
+                &transaction,
+                run_id,
+                state_json,
+                &step_statuses,
+                state,
+                false,
+            )?;
             transaction.commit()?;
             Ok(BoundRecoveryApply::Applied)
         })
@@ -751,6 +827,17 @@ impl SqliteStore {
             .map_err(|_| PortError::new("SQLITE_LOCK", "local database lock is unavailable"))?;
         operation(&mut connection).map_err(sqlite_error)
     }
+
+    fn with_connection_port<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, PortError>,
+    ) -> Result<T, PortError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| PortError::new("SQLITE_LOCK", "local database lock is unavailable"))?;
+        operation(&mut connection)
+    }
 }
 
 #[async_trait]
@@ -797,6 +884,10 @@ impl FlowRepository for SqliteStore {
 
 #[async_trait]
 impl HistoryRepository for SqliteStore {
+    async fn create_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
+        SqliteStore::create_run(self, run_id, state)
+    }
+
     async fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
         SqliteStore::append_run(self, run_id, state)
     }
@@ -816,6 +907,15 @@ impl HistoryRepository for SqliteStore {
         binding: &RunBinding,
     ) -> Result<(), PortError> {
         SqliteStore::append_bound_run(self, run_id, state, binding)
+    }
+
+    async fn create_bound_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<(), PortError> {
+        SqliteStore::create_bound_run(self, run_id, state, binding)
     }
 
     async fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError> {
@@ -849,12 +949,20 @@ fn write_stored_run(
     state_json: String,
     step_statuses: &[(usize, String)],
     state: &RunState,
+    insert_only: bool,
 ) -> rusqlite::Result<()> {
-    transaction.execute(
-        "INSERT INTO runs (id, state_json) VALUES (?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json",
-        params![run_id, state_json],
-    )?;
+    if insert_only {
+        transaction.execute(
+            "INSERT INTO runs (id, state_json) VALUES (?1, ?2)",
+            params![run_id, state_json],
+        )?;
+    } else {
+        transaction.execute(
+            "INSERT INTO runs (id, state_json) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json",
+            params![run_id, state_json],
+        )?;
+    }
     transaction.execute("DELETE FROM run_steps WHERE run_id = ?1", [run_id])?;
     transaction.execute("DELETE FROM recovery_events WHERE run_id = ?1", [run_id])?;
     for (position, status_json) in step_statuses {
@@ -870,6 +978,48 @@ fn write_stored_run(
                 params![run_id, sequence as i64, *step as i64, recovery_action(*action)],
             )?;
         }
+    }
+    Ok(())
+}
+
+fn serialize_stored_run(
+    state: &RunState,
+    stored_run: StoredRun,
+) -> Result<(String, Vec<(usize, String)>), PortError> {
+    let state_json = serde_json::to_string(&stored_run)
+        .map_err(|_| PortError::new("HISTORY_SERIALIZATION", "run history could not be saved"))?;
+    let step_statuses = state
+        .steps()
+        .iter()
+        .enumerate()
+        .map(|(position, step)| {
+            serde_json::to_string(&step.status)
+                .map(|status_json| (position, status_json))
+                .map_err(|_| {
+                    PortError::new("HISTORY_SERIALIZATION", "run history could not be saved")
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((state_json, step_statuses))
+}
+
+fn replace_flow_steps(
+    transaction: &rusqlite::Transaction<'_>,
+    flow: &Flow,
+) -> rusqlite::Result<()> {
+    transaction.execute("DELETE FROM query_steps WHERE flow_id = ?1", [&flow.id])?;
+    for (position, step) in flow.query_steps.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO query_steps (flow_id, position, id, select_sql, upsert_sql)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                flow.id,
+                position as i64,
+                step.id,
+                step.select_sql,
+                step.upsert_sql
+            ],
+        )?;
     }
     Ok(())
 }

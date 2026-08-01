@@ -237,6 +237,20 @@ async fn successful_all_or_nothing_run_commits_target_once() {
 }
 
 #[tokio::test]
+async fn starting_the_same_flow_twice_uses_distinct_opaque_run_ids() {
+    // A fixed clock makes this fail for timestamp-derived IDs and guards each
+    // invocation against overwriting the other run's initial history.
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing);
+
+    let first = harness.runner.start(&harness.flow_id).await.unwrap();
+    let second = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_ne!(first.run_id, second.run_id);
+    assert!(!first.run_id.starts_with("flow-1-"));
+    assert!(!second.run_id.starts_with("flow-1-"));
+}
+
+#[tokio::test]
 async fn committed_steps_are_preserved_and_a_failure_waits_for_recovery() {
     // Would fail if commit-successes ran all steps in one transaction or executed after a failure.
     let harness =

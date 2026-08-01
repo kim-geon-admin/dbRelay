@@ -1,4 +1,6 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::sync::Arc;
+
+use uuid::Uuid;
 
 use crate::{
     application::ports::{
@@ -163,7 +165,7 @@ pub struct MigrationRunner<
     flows: Arc<F>,
     history: Arc<H>,
     credentials: Arc<C>,
-    clock: Arc<K>,
+    _clock: Arc<K>,
 }
 
 impl<
@@ -186,7 +188,7 @@ impl<
             flows,
             history,
             credentials,
-            clock,
+            _clock: clock,
         }
     }
 
@@ -294,11 +296,14 @@ impl<
             }
         };
 
+        let initial_state = RunState::running(flow.transaction_policy, flow.query_steps.len());
+        self.create_bound(&run_id, &initial_state, &binding).await?;
+
         let mut source = match self.connector.open(&source_profile, &source_secret).await {
             Ok(session) => session,
             Err(error) => {
                 return self
-                    .persist_preflight_failure(&flow, &run_id, 0, run_error(error))
+                    .persist_existing_preflight_failure(&run_id, initial_state, 0, run_error(error))
                     .await
             }
         };
@@ -306,7 +311,7 @@ impl<
             Ok(session) => session,
             Err(error) => {
                 return self
-                    .persist_preflight_failure(&flow, &run_id, 0, run_error(error))
+                    .persist_existing_preflight_failure(&run_id, initial_state, 0, run_error(error))
                     .await
             }
         };
@@ -317,25 +322,31 @@ impl<
                 .await
             {
                 return self
-                    .persist_preflight_failure(&flow, &run_id, step_index, error)
+                    .persist_existing_preflight_failure(&run_id, initial_state, step_index, error)
                     .await;
             }
         }
 
         if flow.transaction_policy == TransactionPolicy::CommitSuccesses {
-            let state = RunState::running(flow.transaction_policy, flow.query_steps.len());
             return self
-                .execute_committed_steps(&run_id, &flow, &binding, state, &mut source, &mut target)
+                .execute_committed_steps(
+                    &run_id,
+                    &flow,
+                    &binding,
+                    initial_state,
+                    &mut source,
+                    &mut target,
+                )
                 .await;
         }
 
         if let Err(error) = target.begin().await {
             return self
-                .persist_preflight_failure(&flow, &run_id, 0, run_error(error))
+                .persist_existing_preflight_failure(&run_id, initial_state, 0, run_error(error))
                 .await;
         }
 
-        let mut state = RunState::running(flow.transaction_policy, flow.query_steps.len());
+        let mut state = initial_state;
         for (step_index, step) in flow.query_steps.iter().enumerate() {
             let failure = match source.query(&step.select_sql).await {
                 Ok(rows) => {
@@ -951,7 +962,49 @@ impl<
         };
         let state =
             RunState::from_history(flow.transaction_policy, RunStatus::Failed, steps, events);
+        self.create(run_id, &state).await
+    }
+
+    async fn persist_existing_preflight_failure(
+        &self,
+        run_id: &str,
+        state: RunState,
+        step_index: usize,
+        error: RunError,
+    ) -> Result<RunSnapshot, StartRunError> {
+        let mut steps = vec![StepStatus::NotRun; state.steps().len()];
+        let events = if let Some(step) = steps.get_mut(step_index) {
+            *step = StepStatus::Failed;
+            vec![RunEvent::StepFailed {
+                step: step_index,
+                error,
+            }]
+        } else {
+            Vec::new()
+        };
+        let state = RunState::from_history(state.policy(), RunStatus::Failed, steps, events);
         self.persist(run_id, &state).await
+    }
+
+    async fn create(&self, run_id: &str, state: &RunState) -> Result<RunSnapshot, StartRunError> {
+        self.history
+            .create_run(run_id, state)
+            .await
+            .map_err(StartRunError::from_port)?;
+        Ok(RunSnapshot::from_state(run_id.into(), state))
+    }
+
+    async fn create_bound(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<RunSnapshot, StartRunError> {
+        self.history
+            .create_bound_run(run_id, state, binding)
+            .await
+            .map_err(StartRunError::from_port)?;
+        Ok(RunSnapshot::from_state(run_id.into(), state))
     }
 
     async fn persist(&self, run_id: &str, state: &RunState) -> Result<RunSnapshot, StartRunError> {
@@ -979,28 +1032,24 @@ impl<
         &self,
         profile: &ConnectionProfile,
     ) -> Result<ResolvedSecret, PortError> {
-        match self.credentials.resolve(&profile.id).await {
+        match self.credentials.resolve(&profile.credential_ref).await {
             Ok(secret) => Ok(secret),
             Err(error)
                 if error.code() == "CREDENTIAL_NOT_FOUND"
                     && profile.credential_ref != profile.id =>
             {
-                let secret = self.credentials.resolve(&profile.credential_ref).await?;
-                self.credentials.store(&profile.id, secret.clone()).await?;
+                let secret = self.credentials.resolve(&profile.id).await?;
+                self.credentials
+                    .store(&profile.credential_ref, secret.clone())
+                    .await?;
                 Ok(secret)
             }
             Err(error) => Err(error),
         }
     }
 
-    fn run_id(&self, flow: &Flow) -> String {
-        let timestamp = self
-            .clock
-            .now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        format!("{}-{timestamp}", flow.id)
+    fn run_id(&self, _flow: &Flow) -> String {
+        Uuid::new_v4().to_string()
     }
 }
 

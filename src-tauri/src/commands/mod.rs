@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::SystemTime};
+use std::{path::Path, sync::Arc, time::SystemTime};
 
 use serde::Serialize;
 
@@ -55,8 +55,21 @@ impl ApplicationContainer {
         }
     }
 
-    pub fn for_desktop() -> Result<Self, PortError> {
-        let store = Arc::new(SqliteStore::open("db-relay.sqlite")?);
+    pub fn for_desktop(app_data_dir: impl AsRef<Path>) -> Result<Self, PortError> {
+        let app_data_dir = app_data_dir.as_ref();
+        if !app_data_dir.is_absolute() {
+            return Err(PortError::new(
+                "APP_DATA_PATH",
+                "application data directory must be absolute",
+            ));
+        }
+        std::fs::create_dir_all(app_data_dir).map_err(|_| {
+            PortError::new("APP_DATA_PATH", "application data directory is unavailable")
+        })?;
+        let app_data_dir = app_data_dir.canonicalize().map_err(|_| {
+            PortError::new("APP_DATA_PATH", "application data directory is unavailable")
+        })?;
+        let store = Arc::new(SqliteStore::open(app_data_dir.join("db-relay.sqlite"))?);
         let repository: Arc<dyn FlowRepository> = store.clone();
         let history: Arc<dyn HistoryRepository> = store;
 

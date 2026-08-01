@@ -83,6 +83,24 @@ fn run_history_response_never_serializes_execution_data() {
 }
 
 #[test]
+fn run_event_connector_error_uses_the_tagged_detail_wire_contract() {
+    let event = RunEvent::StepFailed {
+        step: 0,
+        error: db_relay::domain::RunError::connector("ORA-00001", "Unique constraint conflict"),
+    };
+
+    let json = serde_json::to_value(event).unwrap();
+
+    assert_eq!(json["type"], "step_failed");
+    assert_eq!(json["error"]["type"], "connector");
+    assert_eq!(json["error"]["detail"]["code"], "ORA-00001");
+    assert_eq!(
+        json["error"]["detail"]["message"],
+        "Unique constraint conflict"
+    );
+}
+
+#[test]
 fn flow_request_rejects_unsafe_source_and_target_statements() {
     let mut request = valid_flow_request();
     request.query_steps[0].select_sql = "DELETE FROM customer".into();
@@ -91,6 +109,17 @@ fn flow_request_rejects_unsafe_source_and_target_statements() {
     let mut request = valid_flow_request();
     request.query_steps[0].upsert_sql = "TRUNCATE TABLE customer".into();
     assert_eq!(request.into_flow().unwrap_err().code, "INVALID_REQUEST");
+}
+
+#[test]
+fn flow_request_rejects_the_same_connection_as_source_and_target() {
+    let mut request = valid_flow_request();
+    request.target_connection_id = request.source_connection_id.clone();
+
+    let error = request.into_flow().unwrap_err();
+
+    assert_eq!(error.code, "INVALID_REQUEST");
+    assert!(error.detail.contains("must be different"));
 }
 
 fn valid_flow_request() -> FlowRequest {

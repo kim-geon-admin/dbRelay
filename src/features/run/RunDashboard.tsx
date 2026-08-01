@@ -21,6 +21,7 @@ export function RunDashboard({ run: suppliedRun, initialFlows, initialConnection
   const [run, setRun] = useState<Run | undefined>(suppliedRun);
   const [notice, setNotice] = useState<string>();
   const [executionDurationMs, setExecutionDurationMs] = useState<number>();
+  const [starting, setStarting] = useState(false);
 
   useEffect(() => {
     if (suppliedRun || (initialFlows && initialConnections)) return;
@@ -41,6 +42,7 @@ export function RunDashboard({ run: suppliedRun, initialFlows, initialConnection
   const start = async () => {
     if (!flow || !preflightReady) return;
     try {
+      setStarting(true);
       const startedAt = Date.now();
       setExecutionDurationMs(undefined);
       const completedRun = await startRun(flow.id);
@@ -49,6 +51,7 @@ export function RunDashboard({ run: suppliedRun, initialFlows, initialConnection
       setNotice(undefined);
     }
     catch { setNotice("Preflight or execution failed. Review the run log and connection settings."); }
+    finally { setStarting(false); }
   };
   const recover = async (request: Parameters<typeof recoverRun>[1]) => {
     if (!run) return;
@@ -57,7 +60,7 @@ export function RunDashboard({ run: suppliedRun, initialFlows, initialConnection
   };
 
   return <section className="run-dashboard" aria-labelledby="run-dashboard-title">
-    <div className="section-heading"><div><p className="app-page__eyebrow">Execution</p><h1 id="run-dashboard-title">실행</h1></div><button onClick={() => void start()} disabled={!preflightReady || awaitingRecovery}>Run</button></div>
+    <div className="section-heading"><div><p className="app-page__eyebrow">Execution</p><h1 id="run-dashboard-title">실행</h1></div><button onClick={() => void start()} disabled={!preflightReady || awaitingRecovery || starting}>Run</button></div>
     {notice ? <p role="status">{notice}</p> : null}
     {!suppliedRun ? <label className="run-flow-picker">Saved flow<select value={flowId} disabled={awaitingRecovery} onChange={(event) => setFlowId(event.target.value)}><option value="">Choose a flow</option>{flows.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
     {flow ? <div className="run-summary"><p><strong>Source:</strong> {source?.displayName ?? flow.sourceConnectionId}</p><p><strong>Target:</strong> {target?.displayName ?? flow.targetConnectionId}</p><p><strong>Policy:</strong> {policyLabel(flow.transactionPolicy)}</p><p><strong>Preflight:</strong> {preflightReady ? "Ready" : "Resolve flow and connection requirements before running."}</p></div> : null}

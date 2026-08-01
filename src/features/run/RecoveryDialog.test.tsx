@@ -8,7 +8,7 @@ const run: Run = {
   policy: "commit_successes",
   status: { awaiting_recovery: { failed_step: 1 } },
   steps: [{ succeeded: { affected_rows: 3 } }, "failed"],
-  events: [{ type: "step_failed", step: 1, error: { connector: { code: "ORA-00001", message: "Unique constraint conflict", retryable: false } } }],
+  events: [{ type: "step_failed", step: 1, error: { type: "connector", detail: { code: "ORA-00001", message: "Unique constraint conflict", retryable: false } } }],
 };
 
 it("offers exactly the three recovery decisions for a committed-step failure", () => {
@@ -27,7 +27,7 @@ it("resets its mode and SQL when a different failed step replaces the run", () =
   fireEvent.click(screen.getByRole("button", { name: /edit and retry/i }));
   expect(screen.getByDisplayValue("SELECT old")).toBeVisible();
 
-  rerender(<RecoveryDialog run={{ ...run, runId: "run-2", status: { awaiting_recovery: { failed_step: 0 } }, steps: ["failed"], events: [{ type: "step_failed", step: 0, error: { connector: { code: "ORA-00002", message: "new failure", retryable: false } } }] }} step={{ id: "step-1", selectSql: "SELECT new", upsertSql: "MERGE new" }} onEditRetry={vi.fn()} onSkip={vi.fn()} onStop={vi.fn()} />);
+  rerender(<RecoveryDialog run={{ ...run, runId: "run-2", status: { awaiting_recovery: { failed_step: 0 } }, steps: ["failed"], events: [{ type: "step_failed", step: 0, error: { type: "connector", detail: { code: "ORA-00002", message: "new failure", retryable: false } } }] }} step={{ id: "step-1", selectSql: "SELECT new", upsertSql: "MERGE new" }} onEditRetry={vi.fn()} onSkip={vi.fn()} onStop={vi.fn()} />);
 
   expect(screen.getByRole("button", { name: /edit and retry/i })).toBeVisible();
   expect(screen.queryByDisplayValue("SELECT old")).not.toBeInTheDocument();

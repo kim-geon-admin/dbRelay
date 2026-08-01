@@ -45,12 +45,20 @@ impl CredentialStore for CredentialsNotUsed {
 #[derive(Default)]
 struct RecordingCredentialStore {
     stored_connection_ids: Mutex<Vec<String>>,
+    deleted_connection_ids: Mutex<Vec<String>>,
 }
 
 #[cfg(feature = "test-support")]
 impl RecordingCredentialStore {
     fn stored_connection_ids(&self) -> Vec<String> {
         self.stored_connection_ids
+            .lock()
+            .expect("recording credential store lock poisoned")
+            .clone()
+    }
+
+    fn deleted_connection_ids(&self) -> Vec<String> {
+        self.deleted_connection_ids
             .lock()
             .expect("recording credential store lock poisoned")
             .clone()
@@ -72,8 +80,50 @@ impl CredentialStore for RecordingCredentialStore {
         unreachable!("connection testing was not requested")
     }
 
-    async fn delete(&self, _connection_id: &str) -> Result<(), PortError> {
-        unreachable!("credential deletion was not requested")
+    async fn delete(&self, connection_id: &str) -> Result<(), PortError> {
+        self.deleted_connection_ids
+            .lock()
+            .expect("recording credential store lock poisoned")
+            .push(connection_id.into());
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-support")]
+struct MetadataFailureRepository;
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl FlowRepository for MetadataFailureRepository {
+    async fn load_flow(&self, _flow_id: &str) -> Result<Option<Flow>, PortError> {
+        unreachable!()
+    }
+    async fn save_flow(&self, _flow: &Flow) -> Result<(), PortError> {
+        unreachable!()
+    }
+    async fn list_flows(&self) -> Result<Vec<Flow>, PortError> {
+        unreachable!()
+    }
+    async fn load_connection(
+        &self,
+        _connection_id: &str,
+    ) -> Result<Option<ConnectionProfile>, PortError> {
+        unreachable!()
+    }
+    async fn save_connection(&self, _profile: &ConnectionProfile) -> Result<(), PortError> {
+        Err(PortError::new("SQLITE", "metadata persistence failed"))
+    }
+    async fn list_connections(&self) -> Result<Vec<ConnectionProfile>, PortError> {
+        unreachable!()
+    }
+    async fn update_connection(&self, _profile: &ConnectionProfile) -> Result<(), PortError> {
+        unreachable!()
+    }
+    async fn disable_connection(&self, _connection_id: &str) -> Result<(), PortError> {
+        unreachable!()
+    }
+    async fn delete_connection(&self, _connection_id: &str) -> Result<(), PortError> {
+        unreachable!()
     }
 }
 
@@ -261,6 +311,35 @@ fn query_steps_round_trip_in_their_saved_order() {
     );
 }
 
+#[test]
+fn saving_a_stale_flow_version_is_rejected_without_overwriting_the_current_flow() {
+    let store = SqliteStore::in_memory().unwrap();
+    store
+        .save_connection(&profile("source", "credential://db-relay/source"))
+        .unwrap();
+    store
+        .save_connection(&profile("target", "credential://db-relay/target"))
+        .unwrap();
+    let original = flow_referencing("source", "target");
+    store.save_flow(&original).unwrap();
+    let current = store.load_flow("daily-sync").unwrap();
+
+    let mut updated = current.clone();
+    updated.name = "Current update".into();
+    store.save_flow(&updated).unwrap();
+
+    let mut stale = current;
+    stale.name = "Stale update".into();
+    let error = store.save_flow(&stale).unwrap_err();
+
+    assert_eq!(error.code(), "FLOW_VERSION_CONFLICT");
+    assert_eq!(
+        store.load_flow("daily-sync").unwrap().name,
+        "Current update"
+    );
+    assert_eq!(store.load_flow("daily-sync").unwrap().version, 2);
+}
+
 #[tokio::test]
 async fn updating_a_connection_without_a_replacement_keeps_its_credential_reference() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -394,6 +473,24 @@ fn recovery_events_persist_with_the_run_history() {
     store.append_run("run-42", &state).unwrap();
 
     assert_eq!(store.load_run("run-42").unwrap(), Some(state));
+}
+
+#[test]
+fn initial_run_history_insert_rejects_a_collision_without_overwriting_the_first_run() {
+    let store = SqliteStore::in_memory().unwrap();
+    let first = RunState::running(TransactionPolicy::AllOrNothing, 1);
+    let second = RunState::from_history(
+        TransactionPolicy::AllOrNothing,
+        RunStatus::Failed,
+        vec![db_relay::domain::StepStatus::Failed],
+        vec![],
+    );
+
+    store.create_run("opaque-run-id", &first).unwrap();
+    let error = store.create_run("opaque-run-id", &second).unwrap_err();
+
+    assert_eq!(error.code(), "RUN_ID_COLLISION");
+    assert_eq!(store.load_run("opaque-run-id").unwrap(), Some(first));
 }
 
 #[test]
@@ -688,22 +785,27 @@ fn opening_a_legacy_stored_run_resanitizes_an_arbitrary_connector_code() {
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
-async fn settings_service_uses_the_stable_connection_id_for_keyring_storage() {
+async fn settings_service_uses_a_versioned_keyring_account_for_new_metadata() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let credentials = Arc::new(RecordingCredentialStore::default());
     let profile = profile("source", "opaque-reference-not-an-account-name");
 
-    SettingsService::new(store, credentials.clone())
+    SettingsService::new(store.clone(), credentials.clone())
         .save_connection(&profile, ResolvedSecret::for_test("fixture"))
         .await
         .unwrap();
 
-    assert_eq!(credentials.stored_connection_ids(), ["source"]);
+    let persisted = store.load_connection("source").unwrap();
+    assert!(persisted.credential_ref.starts_with("source:"));
+    assert_eq!(
+        credentials.stored_connection_ids(),
+        [persisted.credential_ref]
+    );
 }
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
-async fn settings_service_migrates_a_legacy_credential_reference_to_the_connection_id() {
+async fn settings_service_resolves_a_legacy_credential_reference_without_losing_it() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let credentials = Arc::new(LegacyCredentialStore::default());
     let profile = profile("source", "legacy-opaque-reference");
@@ -717,7 +819,26 @@ async fn settings_service_migrates_a_legacy_credential_reference_to_the_connecti
 
     assert_eq!(
         credentials.resolved_account_names(),
-        ["source", "legacy-opaque-reference"]
+        ["legacy-opaque-reference"]
     );
-    assert_eq!(credentials.stored_account_names(), ["source"]);
+    assert!(credentials.stored_account_names().is_empty());
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn failed_connection_metadata_persistence_deletes_the_new_keyring_account() {
+    let credentials = Arc::new(RecordingCredentialStore::default());
+    let error = SettingsService::new(Arc::new(MetadataFailureRepository), credentials.clone())
+        .save_connection(
+            &profile("source", "legacy-opaque-reference"),
+            ResolvedSecret::for_test("fixture"),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "SQLITE");
+    let stored = credentials.stored_connection_ids();
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].starts_with("source:"));
+    assert_eq!(credentials.deleted_connection_ids(), stored);
 }

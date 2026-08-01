@@ -185,6 +185,11 @@ pub trait FlowRepository: Send + Sync {
 
 #[async_trait]
 pub trait HistoryRepository: Send + Sync {
+    /// Creates the first history record for a run. Production repositories
+    /// must reject an existing ID rather than overwriting its history.
+    async fn create_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
+        self.append_run(run_id, state).await
+    }
     async fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError>;
     async fn load_run(&self, run_id: &str) -> Result<Option<RunState>, PortError>;
     async fn list_runs(&self) -> Result<Vec<RunHistoryEntry>, PortError> {
@@ -199,6 +204,16 @@ pub trait HistoryRepository: Send + Sync {
         state: &RunState,
         binding: &RunBinding,
     ) -> Result<(), PortError>;
+    /// Creates the first bound history record for a run without allowing a
+    /// collision to replace another invocation's persisted configuration.
+    async fn create_bound_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<(), PortError> {
+        self.append_bound_run(run_id, state, binding).await
+    }
     async fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError>;
     async fn apply_bound_recovery(
         &self,

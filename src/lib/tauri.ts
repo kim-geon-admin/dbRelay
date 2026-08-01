@@ -12,12 +12,19 @@ type FlowDto = {
   transactionPolicy: "all_or_nothing" | "commit_successes"; version: number;
 };
 export type RunStatusDto = "draft" | "validating" | "completed" | "rolled_back" | "stopped_by_user" | "failed"
-  | { running: { step: number } } | { awaiting_recovery: { failed_step: number } };
+  | { running: { step: number } } | { awaiting_recovery: { failed_step: number } }
+  | { recovery_pending: { failed_step: number; action: "edit_and_retry" | "skip_and_continue" | "stop" } }
+  | { commit_pending: { step: number } } | { in_doubt: { step: number; reason: RunErrorDto } };
 export type StepStatusDto = "not_run" | "failed" | "skipped_by_user" | { succeeded: { affected_rows: number } };
+export type RunErrorDto =
+  | { type: "connector"; detail: { code: string; message: string; retryable: boolean } }
+  | { type: "invalid_transition"; detail: { status: RunStatusDto; action: "edit_and_retry" | "skip_and_continue" | "stop" } }
+  | { type: "invalid_step"; detail: { expected: number; received: number } }
+  | { type: "step_out_of_bounds"; detail: { step: number; step_count: number } };
 export type RunEventDto =
   | { type: "step_succeeded"; step: number; affected_rows: number }
-  | { type: "step_failed"; step: number; error: { connector?: { code: string; message: string; retryable: boolean } } }
-  | { type: "transaction_failed"; error: { connector?: { code: string; message: string; retryable: boolean } } }
+  | { type: "step_failed"; step: number; error: RunErrorDto }
+  | { type: "transaction_failed"; error: RunErrorDto }
   | { type: "recovery_applied"; step: number; action: "edit_and_retry" | "skip_and_continue" | "stop" };
 export type RunDto = {
   runId: string; policy: "all_or_nothing" | "commit_successes"; status: RunStatusDto;

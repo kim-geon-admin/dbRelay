@@ -30,5 +30,5 @@ export function affectedRows(step: StepStatus): number {
 
 export function recoveryFailure(run: Run, step: number) {
   const event = [...run.events].reverse().find((item) => item.type === "step_failed" && item.step === step);
-  return event?.type === "step_failed" ? event.error.connector : undefined;
+  return event?.type === "step_failed" && event.error.type === "connector" ? event.error.detail : undefined;
 }

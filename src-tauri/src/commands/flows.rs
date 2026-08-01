@@ -100,7 +100,7 @@ pub async fn save_flow(
     FlowService::new(state.repository.clone())
         .save_flow(&flow)
         .await
-        .map(|()| flow.into())
+        .map(FlowResponse::from)
         .map_err(CommandErrorDto::from_port)
 }
 
@@ -124,6 +124,11 @@ impl FlowRequest {
         validate_required(&self.name, "flow name")?;
         validate_required(&self.source_connection_id, "source connection ID")?;
         validate_required(&self.target_connection_id, "target connection ID")?;
+        if self.source_connection_id == self.target_connection_id {
+            return Err(CommandErrorDto::validation(
+                "source and target connection IDs must be different",
+            ));
+        }
         if self.query_steps.is_empty() {
             return Err(CommandErrorDto::validation(
                 "at least one query step is required",
