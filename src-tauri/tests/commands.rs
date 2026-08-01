@@ -34,7 +34,7 @@ fn connection_request_debug_output_redacts_credential_material() {
         kind: DbKind::Oracle,
         host: "db.example.test".into(),
         port: 1521,
-        service_name: "ORCLPDB1".into(),
+        sid: "ORCLPDB1".into(),
         username: "relay".into(),
         source_read_only: true,
         secret: "create-secret".into(),
@@ -45,7 +45,7 @@ fn connection_request_debug_output_redacts_credential_material() {
         kind: DbKind::Oracle,
         host: "db.example.test".into(),
         port: 1521,
-        service_name: "ORCLPDB1".into(),
+        sid: "ORCLPDB1".into(),
         username: "relay".into(),
         source_read_only: true,
         enabled: true,
@@ -79,6 +79,18 @@ fn connection_response_serializes_sid_not_service_name() {
 
     assert_eq!(json["sid"], "XE");
     assert!(json.get("serviceName").is_none());
+}
+
+#[test]
+fn create_request_deserializes_sid() {
+    let request: ConnectionRequest = serde_json::from_value(serde_json::json!({
+        "id": "production", "displayName": "Production", "kind": "oracle",
+        "host": "db.example.test", "port": 1521, "sid": "XE",
+        "username": "relay", "secret": "test-password"
+    }))
+    .unwrap();
+
+    assert_eq!(request.sid, "XE");
 }
 
 #[test]

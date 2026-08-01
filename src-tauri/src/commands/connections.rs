@@ -18,7 +18,7 @@ pub struct ConnectionRequest {
     pub kind: DbKind,
     pub host: String,
     pub port: u16,
-    pub service_name: String,
+    pub sid: String,
     pub username: String,
     #[serde(default)]
     pub source_read_only: bool,
@@ -33,7 +33,7 @@ pub struct UpdateConnectionRequest {
     pub kind: DbKind,
     pub host: String,
     pub port: u16,
-    pub service_name: String,
+    pub sid: String,
     pub username: String,
     #[serde(default)]
     pub source_read_only: bool,
@@ -50,7 +50,7 @@ impl fmt::Debug for ConnectionRequest {
             .field("kind", &self.kind)
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("service_name", &self.service_name)
+            .field("sid", &self.sid)
             .field("username", &self.username)
             .field("secret", &"[REDACTED]")
             .finish()
@@ -66,7 +66,7 @@ impl fmt::Debug for UpdateConnectionRequest {
             .field("kind", &self.kind)
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("service_name", &self.service_name)
+            .field("sid", &self.sid)
             .field("username", &self.username)
             .field("enabled", &self.enabled)
             .field(
@@ -221,7 +221,7 @@ impl ConnectionRequest {
             &self.display_name,
             &self.host,
             self.port,
-            &self.service_name,
+            &self.sid,
             &self.username,
         )?;
         validate_secret(&self.secret)?;
@@ -231,7 +231,7 @@ impl ConnectionRequest {
             kind: self.kind,
             host: self.host.clone(),
             port: self.port,
-            sid: self.service_name.clone(),
+            sid: self.sid.clone(),
             username: self.username.clone(),
             credential_ref: self.id.clone(),
             credential_storage: CredentialStorage::Plaintext,
@@ -249,7 +249,7 @@ impl UpdateConnectionRequest {
             &self.display_name,
             &self.host,
             self.port,
-            &self.service_name,
+            &self.sid,
             &self.username,
         )?;
         Ok(ConnectionProfile {
@@ -258,7 +258,7 @@ impl UpdateConnectionRequest {
             kind: self.kind,
             host: self.host.clone(),
             port: self.port,
-            sid: self.service_name.clone(),
+            sid: self.sid.clone(),
             username: self.username.clone(),
             credential_ref: String::new(),
             credential_storage: CredentialStorage::Plaintext,
@@ -274,14 +274,14 @@ fn validate_connection_fields(
     display_name: &str,
     host: &str,
     port: u16,
-    service_name: &str,
+    sid: &str,
     username: &str,
 ) -> Result<(), CommandErrorDto> {
     validate_id(id, "connection ID")?;
     for (value, label) in [
         (display_name, "display name"),
         (host, "host"),
-        (service_name, "service name"),
+        (sid, "SID"),
         (username, "username"),
     ] {
         if value.trim().is_empty() {
@@ -322,7 +322,7 @@ mod tests {
             kind: DbKind::Oracle,
             host: "db.example.test".into(),
             port: 1521,
-            service_name: "ORCLPDB1".into(),
+            sid: "ORCLPDB1".into(),
             username: "relay".into(),
             source_read_only: false,
             secret: "plain-secret".into(),
@@ -332,5 +332,25 @@ mod tests {
 
         assert_eq!(profile.credential_storage, CredentialStorage::Plaintext);
         assert_eq!(profile.plaintext_password.as_deref(), Some("plain-secret"));
+    }
+
+    #[test]
+    fn new_connection_profiles_carry_sid_and_reject_an_empty_one() {
+        let mut request = ConnectionRequest {
+            id: "production".into(),
+            display_name: "Production".into(),
+            kind: DbKind::Oracle,
+            host: "db.example.test".into(),
+            port: 1521,
+            sid: "XE".into(),
+            username: "relay".into(),
+            source_read_only: false,
+            secret: "plain-secret".into(),
+        };
+
+        assert_eq!(request.new_profile().unwrap().sid, "XE");
+
+        request.sid.clear();
+        assert_eq!(request.new_profile().unwrap_err().detail, "SID is required");
     }
 }
