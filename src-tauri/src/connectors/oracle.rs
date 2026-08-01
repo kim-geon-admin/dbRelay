@@ -618,8 +618,8 @@ mod tests {
             password: "",
         });
 
-        assert_eq!(config.sid(), Some("XE"));
-        assert_eq!(config.service_name(), None);
+        assert_eq!(config.service.sid(), Some("XE"));
+        assert_eq!(config.service.service_name(), None);
     }
 
     #[test]
