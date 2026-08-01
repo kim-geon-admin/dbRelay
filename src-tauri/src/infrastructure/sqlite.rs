@@ -32,6 +32,7 @@ struct StoredRun {
 enum StoredRunEvent {
     StepSucceeded { step: usize, affected_rows: u64 },
     StepFailed { step: usize, error_code: String },
+    TransactionFailed { error_code: String },
     RecoveryApplied { step: usize, action: RecoveryAction },
 }
 
@@ -64,8 +65,13 @@ impl StoredRun {
 
     fn sanitize(mut self) -> Self {
         for event in &mut self.events {
-            if let StoredRunEvent::StepFailed { error_code, .. } = event {
-                *error_code = RunError::connector(std::mem::take(error_code), "").history_code();
+            match event {
+                StoredRunEvent::StepFailed { error_code, .. }
+                | StoredRunEvent::TransactionFailed { error_code } => {
+                    *error_code =
+                        RunError::connector(std::mem::take(error_code), "").history_code();
+                }
+                StoredRunEvent::StepSucceeded { .. } | StoredRunEvent::RecoveryApplied { .. } => {}
             }
         }
         self
@@ -86,6 +92,9 @@ impl StoredRunEvent {
                 step: *step,
                 error_code: error.history_code(),
             },
+            RunEvent::TransactionFailed { error } => Self::TransactionFailed {
+                error_code: error.history_code(),
+            },
             RunEvent::RecoveryApplied { step, action } => Self::RecoveryApplied {
                 step: *step,
                 action: *action,
@@ -104,6 +113,9 @@ impl StoredRunEvent {
             },
             Self::StepFailed { step, error_code } => RunEvent::StepFailed {
                 step,
+                error: RunError::connector(error_code, "sanitized persisted run error"),
+            },
+            Self::TransactionFailed { error_code } => RunEvent::TransactionFailed {
                 error: RunError::connector(error_code, "sanitized persisted run error"),
             },
             Self::RecoveryApplied { step, action } => RunEvent::RecoveryApplied { step, action },

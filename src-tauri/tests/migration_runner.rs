@@ -9,8 +9,8 @@ use db_relay::{
         },
     },
     domain::{
-        ConnectionProfile, DbKind, Flow, NamedRow, QueryStep, RowSet, RunStatus, TransactionPolicy,
-        Value,
+        ConnectionProfile, DbKind, Flow, NamedRow, QueryStep, RowSet, RunError, RunEvent,
+        RunStatus, StepStatus, TransactionPolicy, Value,
     },
     infrastructure::sqlite::SqliteStore,
 };
@@ -210,6 +210,35 @@ async fn persisted_execution_error_never_contains_a_secret() {
     assert!(!harness.history.dump_for_test().contains(secret));
 }
 
+#[tokio::test]
+async fn commit_failure_rolls_back_once_and_persists_the_sanitized_native_error() {
+    let secret = "commit-secret-fixture";
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(0, rows_for_customer())
+        .source_rows_for_step(1, rows_for_address())
+        .target_fails_on_commit(PortError::new("ORA-00942", format!("password={secret}")));
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+    let state = harness.history.load_run(&result.run_id).unwrap().unwrap();
+
+    assert_eq!(result.status, RunStatus::RolledBack);
+    assert_eq!(
+        harness.target_operations(),
+        ["begin", "execute:0", "execute:1", "commit", "rollback"]
+    );
+    assert!(matches!(
+        state.steps()[1].status,
+        StepStatus::Succeeded { affected_rows: 1 }
+    ));
+    assert!(matches!(
+        state.events().last(),
+        Some(RunEvent::TransactionFailed {
+            error: RunError::Connector(error),
+        }) if error.code() == "ORA-00942" && error.message() == "sanitized persisted run error"
+    ));
+    assert!(!harness.history.dump_for_test().contains(secret));
+}
+
 fn rows_for_customer() -> RowSet {
     RowSet::single([("ID", Value::Int(1))])
 }
@@ -307,6 +336,11 @@ impl RunnerHarness {
         self
     }
 
+    fn target_fails_on_commit(self, error: PortError) -> Self {
+        self.connector.fail_target_commit(error);
+        self
+    }
+
     fn target_operations(&self) -> Vec<String> {
         self.connector.target_operations()
     }
@@ -354,6 +388,7 @@ struct RunnerConnectorState {
     target_operations: Mutex<Vec<String>>,
     target_execute_count: Mutex<usize>,
     target_failures: Mutex<BTreeMap<usize, PortError>>,
+    target_commit_failure: Mutex<Option<PortError>>,
 }
 
 impl RunnerConnectorFactory {
@@ -375,6 +410,10 @@ impl RunnerConnectorFactory {
             .lock()
             .unwrap()
             .insert(step, error);
+    }
+
+    fn fail_target_commit(&self, error: PortError) {
+        *self.state.target_commit_failure.lock().unwrap() = Some(error);
     }
 
     fn target_operations(&self) -> Vec<String> {
@@ -502,7 +541,12 @@ impl DatabaseSession for RunnerTargetSession {
             .lock()
             .unwrap()
             .push("commit".into());
-        Ok(())
+        self.state
+            .target_commit_failure
+            .lock()
+            .unwrap()
+            .clone()
+            .map_or(Ok(()), Err)
     }
 
     async fn rollback(&mut self) -> Result<(), PortError> {

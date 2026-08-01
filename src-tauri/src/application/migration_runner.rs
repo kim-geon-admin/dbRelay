@@ -324,6 +324,10 @@ impl<
 
         if let Err(error) = target.commit().await {
             let _ = target.rollback().await;
+            let mut events = state.events().to_vec();
+            events.push(RunEvent::TransactionFailed {
+                error: run_error(error),
+            });
             let rolled_back = RunState::from_history(
                 flow.transaction_policy,
                 RunStatus::RolledBack,
@@ -332,9 +336,8 @@ impl<
                     .iter()
                     .map(|step| step.status.clone())
                     .collect(),
-                state.events().to_vec(),
+                events,
             );
-            let _ = error;
             return self.persist(&run_id, &rolled_back).await;
         }
 

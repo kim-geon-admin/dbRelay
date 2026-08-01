@@ -37,6 +37,7 @@ pub enum RecoveryAction {
 pub enum RunEvent {
     StepSucceeded { step: usize, affected_rows: u64 },
     StepFailed { step: usize, error: RunError },
+    TransactionFailed { error: RunError },
     RecoveryApplied { step: usize, action: RecoveryAction },
 }
 
