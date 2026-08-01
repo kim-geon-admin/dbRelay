@@ -3,7 +3,7 @@ use std::{sync::Arc, time::UNIX_EPOCH};
 use crate::{
     application::ports::{
         Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession, FlowRepository,
-        HistoryRepository, PortError, ResolvedSecret,
+        HistoryRepository, PortError, ResolvedSecret, RunBinding,
     },
     domain::{
         extract_named_binds, map_row, ConnectionProfile, Flow, RecoveryAction, RunError, RunEvent,
@@ -240,6 +240,12 @@ impl<
                 .await;
         }
 
+        let binding = RunBinding {
+            flow: flow.clone(),
+            source_profile: source_profile.clone(),
+            target_profile: target_profile.clone(),
+        };
+
         let source_secret = match self.resolve_credential(&source_profile).await {
             Ok(secret) => secret,
             Err(error) => {
@@ -307,7 +313,7 @@ impl<
         if flow.transaction_policy == TransactionPolicy::CommitSuccesses {
             let state = RunState::running(flow.transaction_policy, flow.query_steps.len());
             return self
-                .execute_committed_steps(&run_id, &flow, state, &mut source, &mut target)
+                .execute_committed_steps(&run_id, &flow, &binding, state, &mut source, &mut target)
                 .await;
         }
 
@@ -416,23 +422,30 @@ impl<
                 ))
             }
         };
-        let flow_id = run_id
-            .rsplit_once('-')
-            .map(|(flow_id, _)| flow_id)
-            .filter(|flow_id| !flow_id.is_empty())
-            .ok_or_else(|| RecoveryError::new("RUN_ID_INVALID", "run ID is invalid"))?;
-        let mut flow = self
-            .flows
-            .load_flow(flow_id)
+        let mut binding = self
+            .history
+            .load_run_binding(run_id)
             .await
             .map_err(RecoveryError::from_port)?
-            .ok_or_else(|| RecoveryError::new("FLOW_NOT_FOUND", "flow was not found"))?;
+            .ok_or_else(|| {
+                RecoveryError::new(
+                    "RECOVERY_CONFIG_MISMATCH",
+                    "run configuration is unavailable for recovery",
+                )
+            })?;
+        self.ensure_recovery_binding(&binding).await?;
         let requested_step_id = match &request {
             RecoveryRequest::EditAndRetry { step_id, .. }
             | RecoveryRequest::SkipAndContinue { step_id }
             | RecoveryRequest::Stop { step_id } => step_id,
         };
-        if flow.query_steps.get(failed_step).map(|step| &step.id) != Some(requested_step_id) {
+        if binding
+            .flow
+            .query_steps
+            .get(failed_step)
+            .map(|step| &step.id)
+            != Some(requested_step_id)
+        {
             return Err(RecoveryError::new(
                 "RECOVERY_STEP_MISMATCH",
                 "recovery request does not target the failed step",
@@ -444,13 +457,13 @@ impl<
                 state
                     .apply_recovery(RecoveryAction::Stop)
                     .map_err(recovery_state_error)?;
-                self.persist_recovery(run_id, &state).await
+                self.persist_recovery(run_id, &state, &binding).await
             }
             RecoveryRequest::SkipAndContinue { .. } => {
                 state
                     .apply_recovery(RecoveryAction::SkipAndContinue)
                     .map_err(recovery_state_error)?;
-                self.persist_recovery(run_id, &state).await?;
+                self.persist_recovery(run_id, &state, &binding).await?;
                 if matches!(state.status(), RunStatus::Completed) {
                     return Ok(RunSnapshot::from_state(run_id.into(), &state));
                 }
@@ -463,56 +476,74 @@ impl<
                         ))
                     }
                 };
-                let (mut source, mut target) = match self.open_sessions(&flow).await {
+                let (mut source, mut target) = match self.open_bound_sessions(&binding).await {
                     Ok(sessions) => sessions,
                     Err(error) => {
                         return self
-                            .persist_recovery_failure(run_id, state, next_step, error)
+                            .persist_recovery_failure(run_id, state, next_step, error, &binding)
                             .await
                     }
                 };
-                self.execute_committed_steps(run_id, &flow, state, &mut source, &mut target)
-                    .await
-                    .map_err(RecoveryError::from)
+                self.execute_committed_steps(
+                    run_id,
+                    &binding.flow,
+                    &binding,
+                    state,
+                    &mut source,
+                    &mut target,
+                )
+                .await
+                .map_err(RecoveryError::from)
             }
             RecoveryRequest::EditAndRetry {
                 select_sql,
                 upsert_sql,
                 ..
             } => {
+                let mut flow = binding.flow.clone();
                 let step = flow.query_steps.get_mut(failed_step).ok_or_else(|| {
                     RecoveryError::new("RECOVERY_STEP_MISMATCH", "failed step was not found")
                 })?;
                 step.select_sql = select_sql;
                 step.upsert_sql = upsert_sql;
-                flow.version = flow.version.saturating_add(1);
+                flow.version = binding.flow.version.checked_add(1).ok_or_else(|| {
+                    RecoveryError::new("FLOW_VERSION_INVALID", "flow version cannot be advanced")
+                })?;
                 self.flows
                     .save_flow(&flow)
                     .await
                     .map_err(RecoveryError::from_port)?;
+                binding.flow = flow;
                 state
                     .apply_recovery(RecoveryAction::EditAndRetry)
                     .map_err(recovery_state_error)?;
-                self.persist_recovery(run_id, &state).await?;
-                let (mut source, mut target) = match self.open_sessions(&flow).await {
+                self.persist_recovery(run_id, &state, &binding).await?;
+                let (mut source, mut target) = match self.open_bound_sessions(&binding).await {
                     Ok(sessions) => sessions,
                     Err(error) => {
                         return self
-                            .persist_recovery_failure(run_id, state, failed_step, error)
+                            .persist_recovery_failure(run_id, state, failed_step, error, &binding)
                             .await
                     }
                 };
                 if let Err(error) = self
-                    .preflight_step(&mut source, &flow.query_steps[failed_step])
+                    .preflight_step(&mut source, &binding.flow.query_steps[failed_step])
                     .await
                 {
                     return self
-                        .persist_recovery_failure(run_id, state, failed_step, error)
+                        .persist_recovery_failure(run_id, state, failed_step, error, &binding)
                         .await;
                 }
-                self.execute_committed_steps(run_id, &flow, state, &mut source, &mut target)
-                    .await
-                    .map_err(RecoveryError::from)
+                self.execute_committed_steps(
+                    run_id,
+                    &binding.flow,
+                    &binding,
+                    state,
+                    &mut source,
+                    &mut target,
+                )
+                .await
+                .map_err(RecoveryError::from)
             }
         }
     }
@@ -521,13 +552,14 @@ impl<
         &self,
         run_id: &str,
         flow: &Flow,
+        binding: &RunBinding,
         mut state: RunState,
         source: &mut Box<dyn DatabaseSession>,
         target: &mut Box<dyn DatabaseSession>,
     ) -> Result<RunSnapshot, StartRunError> {
         let start_step = match state.status() {
             RunStatus::Running { step } => step,
-            RunStatus::Completed => return self.persist(run_id, &state).await,
+            RunStatus::Completed => return self.persist_bound(run_id, &state, binding).await,
             _ => {
                 return Err(StartRunError::new(
                     "RUN_STATE_INVALID",
@@ -539,7 +571,14 @@ impl<
         for step_index in start_step..flow.query_steps.len() {
             if let Err(error) = target.begin().await {
                 return self
-                    .rollback_committed_failure(run_id, target, state, step_index, run_error(error))
+                    .rollback_committed_failure(
+                        run_id,
+                        target,
+                        state,
+                        step_index,
+                        run_error(error),
+                        binding,
+                    )
                     .await;
             }
             let affected_rows = match self
@@ -549,13 +588,22 @@ impl<
                 Ok(affected_rows) => affected_rows,
                 Err(error) => {
                     return self
-                        .rollback_committed_failure(run_id, target, state, step_index, error)
+                        .rollback_committed_failure(
+                            run_id, target, state, step_index, error, binding,
+                        )
                         .await
                 }
             };
             if let Err(error) = target.commit().await {
                 return self
-                    .rollback_committed_failure(run_id, target, state, step_index, run_error(error))
+                    .rollback_committed_failure(
+                        run_id,
+                        target,
+                        state,
+                        step_index,
+                        run_error(error),
+                        binding,
+                    )
                     .await;
             }
             state
@@ -566,7 +614,7 @@ impl<
                         "run state could not record a successful step",
                     )
                 })?;
-            self.persist(run_id, &state).await?;
+            self.persist_bound(run_id, &state, binding).await?;
         }
         Ok(RunSnapshot::from_state(run_id.into(), &state))
     }
@@ -578,6 +626,7 @@ impl<
         mut state: RunState,
         step_index: usize,
         error: RunError,
+        binding: &RunBinding,
     ) -> Result<RunSnapshot, StartRunError> {
         state.record_step_failure(step_index, error).map_err(|_| {
             StartRunError::new(
@@ -586,7 +635,7 @@ impl<
             )
         })?;
         let _ = target.rollback().await;
-        self.persist(run_id, &state).await
+        self.persist_bound(run_id, &state, binding).await
     }
 
     async fn execute_step(
@@ -640,26 +689,40 @@ impl<
         Ok(())
     }
 
-    async fn open_sessions(
-        &self,
-        flow: &Flow,
-    ) -> Result<(Box<dyn DatabaseSession>, Box<dyn DatabaseSession>), RunError> {
+    async fn ensure_recovery_binding(&self, binding: &RunBinding) -> Result<(), RecoveryError> {
+        let flow = self
+            .flows
+            .load_flow(&binding.flow.id)
+            .await
+            .map_err(RecoveryError::from_port)?;
         let source_profile = self
             .flows
-            .load_runnable_connection(&flow.source_connection_id)
+            .load_connection(&binding.source_profile.id)
             .await
-            .map_err(run_error)?
-            .ok_or_else(|| {
-                RunError::connector("CONNECTION_NOT_FOUND", "source connection was not found")
-            })?;
+            .map_err(RecoveryError::from_port)?;
         let target_profile = self
             .flows
-            .load_runnable_connection(&flow.target_connection_id)
+            .load_connection(&binding.target_profile.id)
             .await
-            .map_err(run_error)?
-            .ok_or_else(|| {
-                RunError::connector("CONNECTION_NOT_FOUND", "target connection was not found")
-            })?;
+            .map_err(RecoveryError::from_port)?;
+        if flow.as_ref() != Some(&binding.flow)
+            || source_profile.as_ref() != Some(&binding.source_profile)
+            || target_profile.as_ref() != Some(&binding.target_profile)
+        {
+            return Err(RecoveryError::new(
+                "RECOVERY_CONFIG_MISMATCH",
+                "flow or connection configuration changed after the run paused",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn open_bound_sessions(
+        &self,
+        binding: &RunBinding,
+    ) -> Result<(Box<dyn DatabaseSession>, Box<dyn DatabaseSession>), RunError> {
+        let source_profile = &binding.source_profile;
+        let target_profile = &binding.target_profile;
         if source_profile.kind != self.connector.kind()
             || target_profile.kind != self.connector.kind()
         {
@@ -693,9 +756,10 @@ impl<
         &self,
         run_id: &str,
         state: &RunState,
+        binding: &RunBinding,
     ) -> Result<RunSnapshot, RecoveryError> {
         self.history
-            .append_run(run_id, state)
+            .append_bound_run(run_id, state, binding)
             .await
             .map_err(RecoveryError::from_port)?;
         Ok(RunSnapshot::from_state(run_id.into(), state))
@@ -707,11 +771,12 @@ impl<
         mut state: RunState,
         failed_step: usize,
         error: RunError,
+        binding: &RunBinding,
     ) -> Result<RunSnapshot, RecoveryError> {
         state
             .record_step_failure(failed_step, error)
             .map_err(recovery_state_error)?;
-        self.persist_recovery(run_id, &state).await
+        self.persist_recovery(run_id, &state, binding).await
     }
 
     async fn rollback_after_failure(
@@ -757,6 +822,19 @@ impl<
     async fn persist(&self, run_id: &str, state: &RunState) -> Result<RunSnapshot, StartRunError> {
         self.history
             .append_run(run_id, state)
+            .await
+            .map_err(StartRunError::from_port)?;
+        Ok(RunSnapshot::from_state(run_id.into(), state))
+    }
+
+    async fn persist_bound(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<RunSnapshot, StartRunError> {
+        self.history
+            .append_bound_run(run_id, state, binding)
             .await
             .map_err(StartRunError::from_port)?;
         Ok(RunSnapshot::from_state(run_id.into(), state))

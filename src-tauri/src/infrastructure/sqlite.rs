@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    application::ports::{FlowRepository, HistoryRepository, PortError},
+    application::ports::{FlowRepository, HistoryRepository, PortError, RunBinding},
     domain::{
         ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
         RunStatus, StepStatus, TransactionPolicy,
@@ -25,6 +25,8 @@ struct StoredRun {
     status: RunStatus,
     steps: Vec<StepStatus>,
     events: Vec<StoredRunEvent>,
+    #[serde(default)]
+    binding: Option<RunBinding>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -51,7 +53,14 @@ impl StoredRun {
                 .iter()
                 .map(StoredRunEvent::from_run_event)
                 .collect(),
+            binding: None,
         }
+    }
+
+    fn from_bound_state(state: &RunState, binding: &RunBinding) -> Self {
+        let mut stored = Self::from_state(state);
+        stored.binding = Some(binding.clone());
+        stored
     }
 
     fn into_state(self) -> RunState {
@@ -61,6 +70,10 @@ impl StoredRun {
             .map(StoredRunEvent::into_run_event)
             .collect();
         RunState::from_history(self.policy, self.status, self.steps, events)
+    }
+
+    fn binding(&self) -> Option<RunBinding> {
+        self.binding.clone()
     }
 
     fn sanitize(mut self) -> Self {
@@ -381,7 +394,24 @@ impl SqliteStore {
     }
 
     pub fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
-        let stored_run = StoredRun::from_state(state);
+        self.append_stored_run(run_id, state, StoredRun::from_state(state))
+    }
+
+    pub fn append_bound_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<(), PortError> {
+        self.append_stored_run(run_id, state, StoredRun::from_bound_state(state, binding))
+    }
+
+    fn append_stored_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        stored_run: StoredRun,
+    ) -> Result<(), PortError> {
         let state_json = serde_json::to_string(&stored_run).map_err(|_| {
             PortError::new("HISTORY_SERIALIZATION", "run history could not be saved")
         })?;
@@ -445,6 +475,28 @@ impl SqliteStore {
                     })
             })
             .transpose()
+    }
+
+    pub fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError> {
+        let state_json: Option<String> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT state_json FROM runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })?;
+        state_json
+            .map(|json| {
+                serde_json::from_str::<StoredRun>(&json)
+                    .map(|stored| stored.binding())
+                    .map_err(|_| {
+                        PortError::new("HISTORY_DESERIALIZATION", "run history could not be loaded")
+                    })
+            })
+            .transpose()
+            .map(Option::flatten)
     }
 
     #[doc(hidden)]
@@ -582,6 +634,19 @@ impl HistoryRepository for SqliteStore {
 
     async fn load_run(&self, run_id: &str) -> Result<Option<RunState>, PortError> {
         SqliteStore::load_run(self, run_id)
+    }
+
+    async fn append_bound_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<(), PortError> {
+        SqliteStore::append_bound_run(self, run_id, state, binding)
+    }
+
+    async fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError> {
+        SqliteStore::load_run_binding(self, run_id)
     }
 }
 
@@ -788,6 +853,7 @@ fn migrate_legacy_run_history(connection: &mut Connection) -> rusqlite::Result<(
                 status: RunStatus::Failed,
                 steps: Vec::new(),
                 events: Vec::new(),
+                binding: None,
             })
             .sanitize();
         let sanitized_json =

@@ -307,6 +307,42 @@ async fn recovery_rejects_a_request_for_a_nonfailed_step() {
 }
 
 #[tokio::test]
+async fn recovery_rejects_a_flow_changed_after_the_run_paused() {
+    // Would fail if recovery loaded mutable flow configuration instead of its paused-run binding.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    let operations_before_recovery = harness.target_operations();
+
+    let replacement_target = connection_profile("replacement-target", "credential://replacement");
+    harness
+        .history
+        .save_connection(&replacement_target)
+        .unwrap();
+    let mut changed_flow = harness.history.load_flow(&harness.flow_id).unwrap();
+    changed_flow.target_connection_id = replacement_target.id;
+    changed_flow.transaction_policy = TransactionPolicy::AllOrNothing;
+    changed_flow.query_steps[0].upsert_sql =
+        "merge changed_customer using dual on (id = :ID)".into();
+    changed_flow.version += 1;
+    harness.history.save_flow(&changed_flow).unwrap();
+
+    let error = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::SkipAndContinue {
+                step_id: "address".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "RECOVERY_CONFIG_MISMATCH");
+    assert_eq!(harness.target_operations(), operations_before_recovery);
+}
+
+#[tokio::test]
 async fn stop_preserves_committed_steps_and_does_not_execute_later_steps() {
     // Would fail if stop continued the run after recording the user's decision.
     let harness =

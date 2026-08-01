@@ -1,8 +1,19 @@
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::{ConnectionProfile, DbKind, Flow, NamedRow, RowSet, RunState};
+
+/// Immutable flow and connection configuration associated with a migration run.
+///
+/// This contains connection metadata but never resolved credential material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RunBinding {
+    pub flow: Flow,
+    pub source_profile: ConnectionProfile,
+    pub target_profile: ConnectionProfile,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PortError {
@@ -123,6 +134,13 @@ pub trait FlowRepository: Send + Sync {
 pub trait HistoryRepository: Send + Sync {
     async fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError>;
     async fn load_run(&self, run_id: &str) -> Result<Option<RunState>, PortError>;
+    async fn append_bound_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<(), PortError>;
+    async fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError>;
 }
 
 pub trait Clock: Send + Sync {
