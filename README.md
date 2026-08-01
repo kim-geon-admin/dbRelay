@@ -8,7 +8,7 @@ DB Relay is a Windows desktop application for running reusable, ordered Oracle m
 - Node.js 22 and pnpm 10.
 - Rust stable with the `rustfmt` and `clippy` components.
 - Visual Studio Build Tools with the Desktop development with C++ workload and Windows SDK, as required by Tauri on Windows.
-- Oracle Client libraries reachable by `oracle-rs` when connecting to Oracle.
+- Network access to an Oracle database server, plus its connection details and valid credentials.
 
 Install dependencies and start the desktop application:
 
@@ -37,11 +37,11 @@ pnpm test
 pnpm build
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --features test-support
 pnpm tauri build
 ```
 
-The Oracle integration test is intentionally ignored unless a disposable Oracle instance is supplied. Set `DB_RELAY_ORACLE_TEST_URL` only in your shell or CI secret, then run:
+The Rust test command enables `test-support`, covering the migration-runner and SQLite integration tests that are gated behind that feature. The Oracle integration test is intentionally ignored unless a disposable Oracle instance is supplied. Set `DB_RELAY_ORACLE_TEST_URL` only in your shell or CI secret, then run:
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml --test oracle_contract -- --ignored
