@@ -262,7 +262,7 @@ fn profile(id: &str, credential_ref: &str) -> ConnectionProfile {
 #[test]
 fn legacy_profile_json_with_service_name_deserializes_as_sid() {
     let profile: ConnectionProfile = serde_json::from_str(
-        r#"{"id":"legacy","display_name":"Legacy","kind":"oracle","host":"db.example","port":1521,"service_name":"XE","username":"relay","credential_ref":"ref","enabled":true}"#,
+        r#"{"id":"legacy","display_name":"Legacy","kind":"oracle","host":"db.example","port":1521,"service_name":"XE","username":"relay","credential_ref":"","enabled":true}"#,
     )
     .unwrap();
 
@@ -295,7 +295,7 @@ fn legacy_sqlite_service_name_column_loads_as_sid() {
                 enabled INTEGER NOT NULL
             );
             INSERT INTO connection_profiles VALUES
-                ('legacy', 'Legacy', 'oracle', 'db.example', 1521, 'XE', 'relay', 'ref', 1);
+                ('legacy', 'Legacy', 'oracle', 'db.example', 1521, 'XE', 'relay', '', 1);
             "#,
         )
         .unwrap();
