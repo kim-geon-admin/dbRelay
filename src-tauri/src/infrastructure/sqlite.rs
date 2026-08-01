@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     application::ports::{
         BoundRecoveryApply, FlowRepository, HistoryRepository, PortError, RunBinding,
+        RunHistoryEntry,
     },
     domain::{
         ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
@@ -594,6 +595,30 @@ impl SqliteStore {
             .transpose()
     }
 
+    pub fn list_runs(&self) -> Result<Vec<RunHistoryEntry>, PortError> {
+        let runs: Vec<(String, String)> = self.with_connection(|connection| {
+            let mut statement =
+                connection.prepare("SELECT id, state_json FROM runs ORDER BY id DESC")?;
+            let runs = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect();
+            runs
+        })?;
+
+        runs.into_iter()
+            .map(|(run_id, state_json)| {
+                serde_json::from_str::<StoredRun>(&state_json)
+                    .map(|stored| RunHistoryEntry {
+                        run_id,
+                        state: stored.into_state(),
+                    })
+                    .map_err(|_| {
+                        PortError::new("HISTORY_DESERIALIZATION", "run history could not be loaded")
+                    })
+            })
+            .collect()
+    }
+
     pub fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError> {
         let state_json: Option<String> = self.with_connection(|connection| {
             connection
@@ -751,6 +776,10 @@ impl HistoryRepository for SqliteStore {
 
     async fn load_run(&self, run_id: &str) -> Result<Option<RunState>, PortError> {
         SqliteStore::load_run(self, run_id)
+    }
+
+    async fn list_runs(&self) -> Result<Vec<RunHistoryEntry>, PortError> {
+        SqliteStore::list_runs(self)
     }
 
     async fn append_bound_run(

@@ -15,6 +15,14 @@ pub struct RunBinding {
     pub target_profile: ConnectionProfile,
 }
 
+/// A persisted run with its opaque state. Command DTOs must project this into
+/// a safe summary rather than serializing the binding or event payloads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunHistoryEntry {
+    pub run_id: String,
+    pub state: RunState,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BoundRecoveryApply {
     Applied,
@@ -179,6 +187,12 @@ pub trait FlowRepository: Send + Sync {
 pub trait HistoryRepository: Send + Sync {
     async fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError>;
     async fn load_run(&self, run_id: &str) -> Result<Option<RunState>, PortError>;
+    async fn list_runs(&self) -> Result<Vec<RunHistoryEntry>, PortError> {
+        Err(PortError::new(
+            "HISTORY_LIST_UNAVAILABLE",
+            "run history listing is unavailable",
+        ))
+    }
     async fn append_bound_run(
         &self,
         run_id: &str,

@@ -1,0 +1,45 @@
+use db_relay::{
+    commands::{ConnectionResponse, RunHistoryResponse},
+    domain::{ConnectionProfile, DbKind, RunStatus, StepStatus},
+};
+
+fn profile_with_secret_reference() -> ConnectionProfile {
+    ConnectionProfile {
+        id: "production".into(),
+        display_name: "Production".into(),
+        kind: DbKind::Oracle,
+        host: "db.example.test".into(),
+        port: 1521,
+        service_name: "ORCLPDB1".into(),
+        username: "relay".into(),
+        credential_ref: "keyring://production-password".into(),
+        enabled: true,
+    }
+}
+
+#[test]
+fn connection_response_never_serializes_credential_material() {
+    let response = ConnectionResponse::from(profile_with_secret_reference());
+
+    let json = serde_json::to_string(&response).unwrap();
+
+    assert!(!json.contains("password"));
+    assert!(!json.contains("token"));
+    assert!(!json.contains("credential_ref"));
+    assert!(!json.contains("keyring://production-password"));
+}
+
+#[test]
+fn run_history_response_never_serializes_execution_data() {
+    let response = RunHistoryResponse {
+        run_id: "migration-42".into(),
+        status: RunStatus::Completed,
+        steps: vec![StepStatus::Succeeded { affected_rows: 3 }],
+    };
+
+    let json = serde_json::to_string(&response).unwrap();
+
+    assert!(!json.contains("source_rows"));
+    assert!(!json.contains("bind_values"));
+    assert!(!json.contains("binding"));
+}
