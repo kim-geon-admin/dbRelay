@@ -434,6 +434,7 @@ impl<
                 )
             })?;
         self.ensure_recovery_binding(&binding).await?;
+        let paused_state = state.clone();
         let paused_binding = binding.clone();
         let requested_step_id = match &request {
             RecoveryRequest::EditAndRetry { step_id, .. }
@@ -458,7 +459,7 @@ impl<
                 state
                     .apply_recovery(RecoveryAction::Stop)
                     .map_err(recovery_state_error)?;
-                self.apply_bound_recovery(run_id, &state, &binding, &binding, None)
+                self.apply_bound_recovery(run_id, &state, &paused_state, &binding, &binding, None)
                     .await?;
                 Ok(RunSnapshot::from_state(run_id.into(), &state))
             }
@@ -466,7 +467,7 @@ impl<
                 state
                     .apply_recovery(RecoveryAction::SkipAndContinue)
                     .map_err(recovery_state_error)?;
-                self.apply_bound_recovery(run_id, &state, &binding, &binding, None)
+                self.apply_bound_recovery(run_id, &state, &paused_state, &binding, &binding, None)
                     .await?;
                 if matches!(state.status(), RunStatus::Completed) {
                     return Ok(RunSnapshot::from_state(run_id.into(), &state));
@@ -520,6 +521,7 @@ impl<
                 self.apply_bound_recovery(
                     run_id,
                     &state,
+                    &paused_state,
                     &paused_binding,
                     &binding,
                     Some(&binding.flow),
@@ -776,6 +778,7 @@ impl<
         &self,
         run_id: &str,
         state: &RunState,
+        expected_state: &RunState,
         expected_binding: &RunBinding,
         persisted_binding: &RunBinding,
         updated_flow: Option<&Flow>,
@@ -785,6 +788,7 @@ impl<
             .apply_bound_recovery(
                 run_id,
                 state,
+                expected_state,
                 expected_binding,
                 persisted_binding,
                 updated_flow,
@@ -796,6 +800,10 @@ impl<
             BoundRecoveryApply::ConfigurationChanged => Err(RecoveryError::new(
                 "RECOVERY_CONFIG_MISMATCH",
                 "flow or connection configuration changed after the run paused",
+            )),
+            BoundRecoveryApply::RecoveryNoLongerAvailable => Err(RecoveryError::new(
+                "RECOVERY_NOT_AVAILABLE",
+                "run is no longer awaiting recovery",
             )),
         }
     }

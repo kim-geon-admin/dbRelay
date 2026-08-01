@@ -441,6 +441,7 @@ impl SqliteStore {
         &self,
         run_id: &str,
         state: &RunState,
+        expected_state: &RunState,
         expected_binding: &RunBinding,
         persisted_binding: &RunBinding,
         updated_flow: Option<&Flow>,
@@ -463,6 +464,26 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         self.with_connection(|connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current_run_json: Option<String> = transaction
+                .query_row(
+                    "SELECT state_json FROM runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(current_run_json) = current_run_json else {
+                return Ok(BoundRecoveryApply::RecoveryNoLongerAvailable);
+            };
+            let current_run = serde_json::from_str::<StoredRun>(&current_run_json)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let current_binding = current_run.binding();
+            let current_state = current_run.into_state();
+            if current_state != *expected_state
+                || !matches!(current_state.status(), RunStatus::AwaitingRecovery { .. })
+                || current_binding.as_ref() != Some(expected_binding)
+            {
+                return Ok(BoundRecoveryApply::RecoveryNoLongerAvailable);
+            }
             let flow_exists: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM flows WHERE id = ?1)",
                 [&expected_binding.flow.id],
@@ -717,6 +738,7 @@ impl HistoryRepository for SqliteStore {
         &self,
         run_id: &str,
         state: &RunState,
+        expected_state: &RunState,
         expected_binding: &RunBinding,
         persisted_binding: &RunBinding,
         updated_flow: Option<&Flow>,
@@ -725,6 +747,7 @@ impl HistoryRepository for SqliteStore {
             self,
             run_id,
             state,
+            expected_state,
             expected_binding,
             persisted_binding,
             updated_flow,

@@ -19,6 +19,7 @@ pub struct RunBinding {
 pub enum BoundRecoveryApply {
     Applied,
     ConfigurationChanged,
+    RecoveryNoLongerAvailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,6 +152,7 @@ pub trait HistoryRepository: Send + Sync {
         &self,
         run_id: &str,
         state: &RunState,
+        expected_state: &RunState,
         expected_binding: &RunBinding,
         persisted_binding: &RunBinding,
         updated_flow: Option<&Flow>,

@@ -4,13 +4,13 @@ use db_relay::{
     application::{
         migration_runner::{MigrationRunner, RecoveryRequest},
         ports::{
-            Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession, FlowRepository,
-            PortError, ResolvedSecret,
+            BoundRecoveryApply, Clock, CredentialStore, DatabaseConnectorFactory, DatabaseSession,
+            FlowRepository, HistoryRepository, PortError, ResolvedSecret, RunBinding,
         },
     },
     domain::{
-        ConnectionProfile, DbKind, Flow, NamedRow, QueryStep, RowSet, RunError, RunEvent,
-        RunStatus, StepStatus, TransactionPolicy, Value,
+        ConnectionProfile, DbKind, Flow, NamedRow, QueryStep, RecoveryAction, RowSet, RunError,
+        RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy, Value,
     },
     infrastructure::sqlite::SqliteStore,
 };
@@ -406,6 +406,47 @@ async fn recovery_rejects_a_change_that_interleaves_after_preliminary_validation
 }
 
 #[tokio::test]
+async fn competing_recovery_rejects_skip_after_stop_wins_without_target_activity() {
+    // Would fail if a second recovery could overwrite a committed Stop transition.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(0);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    let operations_before_recovery = harness.target_operations();
+    let history = Arc::new(CompetingRecoveryHistory::stop_before_next_apply(
+        harness.history.clone(),
+    ));
+    let runner = MigrationRunner::new(
+        harness.connector.clone(),
+        harness.history.clone(),
+        history,
+        harness.credentials.clone(),
+        Arc::new(FixedClock),
+    );
+
+    let error = runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::SkipAndContinue {
+                step_id: "customer".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "RECOVERY_NOT_AVAILABLE");
+    assert_eq!(harness.target_operations(), operations_before_recovery);
+    assert_eq!(
+        harness
+            .history
+            .load_run(&paused.run_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        RunStatus::StoppedByUser
+    );
+}
+
+#[tokio::test]
 async fn stop_preserves_committed_steps_and_does_not_execute_later_steps() {
     // Would fail if stop continued the run after recording the user's decision.
     let harness =
@@ -661,6 +702,76 @@ impl FlowRepository for InterleavingFlowRepository {
 
     async fn delete_connection(&self, connection_id: &str) -> Result<(), PortError> {
         self.store.delete_connection(connection_id)
+    }
+}
+
+struct CompetingRecoveryHistory {
+    store: Arc<SqliteStore>,
+    stop_before_next_apply: Mutex<bool>,
+}
+
+impl CompetingRecoveryHistory {
+    fn stop_before_next_apply(store: Arc<SqliteStore>) -> Self {
+        Self {
+            store,
+            stop_before_next_apply: Mutex::new(true),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl HistoryRepository for CompetingRecoveryHistory {
+    async fn append_run(&self, run_id: &str, state: &RunState) -> Result<(), PortError> {
+        self.store.append_run(run_id, state)
+    }
+
+    async fn load_run(&self, run_id: &str) -> Result<Option<RunState>, PortError> {
+        self.store.load_run(run_id)
+    }
+
+    async fn append_bound_run(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        binding: &RunBinding,
+    ) -> Result<(), PortError> {
+        self.store.append_bound_run(run_id, state, binding)
+    }
+
+    async fn load_run_binding(&self, run_id: &str) -> Result<Option<RunBinding>, PortError> {
+        self.store.load_run_binding(run_id)
+    }
+
+    async fn apply_bound_recovery(
+        &self,
+        run_id: &str,
+        state: &RunState,
+        expected_state: &RunState,
+        expected_binding: &RunBinding,
+        persisted_binding: &RunBinding,
+        updated_flow: Option<&Flow>,
+    ) -> Result<BoundRecoveryApply, PortError> {
+        if std::mem::take(&mut *self.stop_before_next_apply.lock().unwrap()) {
+            let mut stopped = self.store.load_run(run_id)?.unwrap();
+            stopped.apply_recovery(RecoveryAction::Stop).unwrap();
+            let result = self.store.apply_bound_recovery(
+                run_id,
+                &stopped,
+                expected_state,
+                expected_binding,
+                expected_binding,
+                None,
+            )?;
+            assert_eq!(result, BoundRecoveryApply::Applied);
+        }
+        self.store.apply_bound_recovery(
+            run_id,
+            state,
+            expected_state,
+            expected_binding,
+            persisted_binding,
+            updated_flow,
+        )
     }
 }
 
