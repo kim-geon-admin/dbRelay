@@ -23,6 +23,12 @@
 
 ## Final verification
 
+## Review fix round 2
+
+- The dialog now focuses the first valid control after each choice/edit/confirmation mode transition and cycles focus explicitly for Tab and Shift+Tab.
+- Regression coverage proves Edit-to-Tab, Back-to-Tab, and Skip/Stop confirmation transitions remain within the modal.
+- Verification: focused recovery-dialog tests (4), full UI suite (17), `pnpm lint`, and `pnpm build` passed.
+
 - `pnpm test` — 12 tests passed.
 - `pnpm lint` — passed.
 - `pnpm build` — passed.

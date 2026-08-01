@@ -52,3 +52,25 @@ it("focuses the first action, traps Tab, and restores prior focus when closed", 
   expect(trigger).toHaveFocus();
   trigger.remove();
 });
+
+it("moves focus to the first control after every recovery mode transition", () => {
+  render(<RecoveryDialog run={run} step={{ id: "step-2", selectSql: "SELECT 1", upsertSql: "MERGE" }} onEditRetry={vi.fn()} onSkip={vi.fn()} onStop={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: /edit and retry/i }));
+  const sourceSql = screen.getByRole("textbox", { name: "Source SQL" });
+  const targetSql = screen.getByRole("textbox", { name: "Target SQL" });
+  expect(sourceSql).toHaveFocus();
+  fireEvent.keyDown(sourceSql, { key: "Tab" });
+  expect(targetSql).toHaveFocus();
+
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  const edit = screen.getByRole("button", { name: /edit and retry/i });
+  expect(edit).toHaveFocus();
+  fireEvent.keyDown(edit, { key: "Tab" });
+  expect(screen.getByRole("button", { name: /skip and continue/i })).toHaveFocus();
+
+  fireEvent.click(screen.getByRole("button", { name: /skip and continue/i }));
+  expect(screen.getByRole("button", { name: /confirm skip and continue/i })).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  fireEvent.click(screen.getByRole("button", { name: /^stop$/i }));
+  expect(screen.getByRole("button", { name: /confirm stop/i })).toHaveFocus();
+});
