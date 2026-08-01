@@ -18,6 +18,12 @@ use db_relay::{
     infrastructure::sqlite::SqliteStore,
 };
 
+#[cfg(feature = "test-support")]
+use db_relay::{
+    application::ports::{DatabaseConnectorFactory, DatabaseSession},
+    domain::{NamedRow, RowSet},
+};
+
 struct CredentialsNotUsed;
 
 #[async_trait]
@@ -68,6 +74,107 @@ impl CredentialStore for RecordingCredentialStore {
 
     async fn delete(&self, _connection_id: &str) -> Result<(), PortError> {
         unreachable!("credential deletion was not requested")
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct LegacyCredentialStore {
+    resolved_account_names: Mutex<Vec<String>>,
+    stored_account_names: Mutex<Vec<String>>,
+}
+
+#[cfg(feature = "test-support")]
+impl LegacyCredentialStore {
+    fn resolved_account_names(&self) -> Vec<String> {
+        self.resolved_account_names
+            .lock()
+            .expect("legacy credential store lock poisoned")
+            .clone()
+    }
+
+    fn stored_account_names(&self) -> Vec<String> {
+        self.stored_account_names
+            .lock()
+            .expect("legacy credential store lock poisoned")
+            .clone()
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl CredentialStore for LegacyCredentialStore {
+    async fn store(&self, connection_id: &str, _secret: ResolvedSecret) -> Result<(), PortError> {
+        self.stored_account_names
+            .lock()
+            .expect("legacy credential store lock poisoned")
+            .push(connection_id.into());
+        Ok(())
+    }
+
+    async fn resolve(&self, account_name: &str) -> Result<ResolvedSecret, PortError> {
+        self.resolved_account_names
+            .lock()
+            .expect("legacy credential store lock poisoned")
+            .push(account_name.into());
+        if account_name == "legacy-opaque-reference" {
+            Ok(ResolvedSecret::for_test("fixture"))
+        } else {
+            Err(PortError::new(
+                "CREDENTIAL_NOT_FOUND",
+                "credential not found",
+            ))
+        }
+    }
+
+    async fn delete(&self, _connection_id: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-support")]
+struct AcceptingConnector;
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl DatabaseConnectorFactory for AcceptingConnector {
+    fn kind(&self) -> DbKind {
+        DbKind::Oracle
+    }
+
+    async fn open(
+        &self,
+        _profile: &ConnectionProfile,
+        _secret: &ResolvedSecret,
+    ) -> Result<Box<dyn DatabaseSession>, PortError> {
+        Ok(Box::new(AcceptingSession))
+    }
+}
+
+#[cfg(feature = "test-support")]
+struct AcceptingSession;
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl DatabaseSession for AcceptingSession {
+    async fn query(&mut self, _sql: &str) -> Result<RowSet, PortError> {
+        Ok(RowSet::default())
+    }
+
+    async fn begin(&mut self) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn execute_named(&mut self, _sql: &str, _batch: &[NamedRow]) -> Result<u64, PortError> {
+        Ok(0)
+    }
+
+    async fn commit(&mut self) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn rollback(&mut self) -> Result<(), PortError> {
+        Ok(())
     }
 }
 
@@ -308,6 +415,24 @@ fn run_history_never_persists_an_untrusted_connector_message() {
 }
 
 #[test]
+fn run_history_never_persists_an_untrusted_connector_code() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut state = RunState::running(TransactionPolicy::CommitSuccesses, 1);
+    state
+        .record_step_failure(
+            0,
+            RunError::connector("untrusted-history-code-secret-fixture", "connection failed"),
+        )
+        .unwrap();
+
+    store.append_run("run-with-untrusted-code", &state).unwrap();
+
+    assert!(!store
+        .dump_for_test()
+        .contains("untrusted-history-code-secret-fixture"));
+}
+
+#[test]
 fn recovery_events_keep_each_decision_for_the_same_step() {
     let store = SqliteStore::in_memory().unwrap();
     let mut state = RunState::awaiting_recovery_after_step(1, 3).unwrap();
@@ -354,7 +479,8 @@ fn opening_a_legacy_database_upgrades_flow_references_and_recovery_sequences() {
     let legacy = rusqlite::Connection::open(&path).unwrap();
     legacy
         .execute_batch(
-            "
+            r#"
+            PRAGMA foreign_keys = OFF;
             CREATE TABLE connection_profiles (
                 id TEXT PRIMARY KEY NOT NULL,
                 display_name TEXT NOT NULL,
@@ -399,9 +525,12 @@ fn opening_a_legacy_database_upgrades_flow_references_and_recovery_sequences() {
                 ('source', 'source', 'oracle', 'db.internal', 1521, 'XE', 'relay', 'opaque-source', 1),
                 ('target', 'target', 'oracle', 'db.internal', 1521, 'XE', 'relay', 'opaque-target', 1);
             INSERT INTO flows VALUES ('legacy-flow', 'Legacy flow', 'source', 'target', 'commit_successes', 1);
+            INSERT INTO flows VALUES ('orphan-flow', 'Orphan flow', 'source', 'missing-target', 'commit_successes', 1);
             INSERT INTO runs VALUES ('legacy-run', '{}');
+            INSERT INTO run_steps VALUES ('missing-run', 0, '"not_run"');
             INSERT INTO recovery_events VALUES ('legacy-run', 0, 'edit_and_retry');
-            ",
+            INSERT INTO recovery_events VALUES ('missing-run', 0, 'stop');
+            "#,
         )
         .unwrap();
     drop(legacy);
@@ -409,6 +538,13 @@ fn opening_a_legacy_database_upgrades_flow_references_and_recovery_sequences() {
     let store = SqliteStore::open(&path).unwrap();
 
     let recovery_event_count = store.recovery_event_count_for_test("legacy-run");
+    let orphan_recovery_event_count = store.recovery_event_count_for_test("missing-run");
+    let migrated_flow_ids = store
+        .list_flows()
+        .unwrap()
+        .into_iter()
+        .map(|flow| flow.id)
+        .collect::<Vec<_>>();
     let flow_error_code = store
         .save_flow(&flow_referencing("source", "missing-target"))
         .unwrap_err()
@@ -432,8 +568,44 @@ fn opening_a_legacy_database_upgrades_flow_references_and_recovery_sequences() {
     std::fs::remove_file(path).unwrap();
 
     assert_eq!(recovery_event_count, 1);
+    assert_eq!(orphan_recovery_event_count, 0);
+    assert_eq!(migrated_flow_ids, ["legacy-flow"]);
     assert_eq!(flow_error_code, "SQLITE");
     assert_eq!(upgraded_recovery_event_count, 2);
+}
+
+#[test]
+fn opening_a_legacy_failed_run_rewrites_it_as_safe_readable_history() {
+    let path = std::env::temp_dir().join(format!(
+        "db-relay-legacy-history-{}-{}.sqlite",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            r#"
+            CREATE TABLE runs (id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL);
+            INSERT INTO runs VALUES (
+                'legacy-failed-run',
+                '{"policy":"commit_successes","status":{"awaiting_recovery":{"failed_step":0}},"steps":[{"status":"failed"}],"events":[{"type":"step_failed","step":0,"error":{"type":"connector","detail":{"code":"ORA-01017","message":"legacy-raw-history-secret-fixture"}}}]}'
+            );
+            "#,
+        )
+        .unwrap();
+    drop(legacy);
+
+    let store = SqliteStore::open(&path).unwrap();
+    let loaded = store.load_run("legacy-failed-run").unwrap();
+    let dump = store.dump_for_test();
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+
+    assert!(loaded.is_some());
+    assert!(!dump.contains("legacy-raw-history-secret-fixture"));
 }
 
 #[cfg(feature = "test-support")]
@@ -449,4 +621,25 @@ async fn settings_service_uses_the_stable_connection_id_for_keyring_storage() {
         .unwrap();
 
     assert_eq!(credentials.stored_connection_ids(), ["source"]);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn settings_service_migrates_a_legacy_credential_reference_to_the_connection_id() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let credentials = Arc::new(LegacyCredentialStore::default());
+    let profile = profile("source", "legacy-opaque-reference");
+    store.save_connection(&profile).unwrap();
+    let factory = AcceptingConnector;
+
+    SettingsService::new(store, credentials.clone())
+        .test_connection("source", &factory)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        credentials.resolved_account_names(),
+        ["source", "legacy-opaque-reference"]
+    );
+    assert_eq!(credentials.stored_account_names(), ["source"]);
 }

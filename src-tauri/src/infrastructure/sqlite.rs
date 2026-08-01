@@ -162,9 +162,10 @@ impl SqliteStore {
                     PRIMARY KEY (run_id, sequence)
                 );
                 ",
-            )
+        )
             .map_err(sqlite_error)?;
         migrate_legacy_schema(&mut connection).map_err(sqlite_error)?;
+        migrate_legacy_run_history(&mut connection).map_err(sqlite_error)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -689,10 +690,15 @@ fn migrate_legacy_schema(connection: &mut Connection) -> rusqlite::Result<()> {
                     PRIMARY KEY (flow_id, position)
                 );
                 INSERT INTO flows (id, name, source_connection_id, target_connection_id, transaction_policy, version)
-                    SELECT id, name, source_connection_id, target_connection_id, transaction_policy, version
-                    FROM flows_legacy;
+                    SELECT legacy.id, legacy.name, legacy.source_connection_id, legacy.target_connection_id,
+                           legacy.transaction_policy, legacy.version
+                    FROM flows_legacy AS legacy
+                    WHERE EXISTS (SELECT 1 FROM connection_profiles WHERE id = legacy.source_connection_id)
+                      AND EXISTS (SELECT 1 FROM connection_profiles WHERE id = legacy.target_connection_id);
                 INSERT INTO query_steps (flow_id, position, id, select_sql, upsert_sql)
-                    SELECT flow_id, position, id, select_sql, upsert_sql FROM query_steps_legacy;
+                    SELECT legacy.flow_id, legacy.position, legacy.id, legacy.select_sql, legacy.upsert_sql
+                    FROM query_steps_legacy AS legacy
+                    WHERE EXISTS (SELECT 1 FROM flows WHERE id = legacy.flow_id);
                 DROP TABLE query_steps_legacy;
                 DROP TABLE flows_legacy;
                 ",
@@ -710,15 +716,66 @@ fn migrate_legacy_schema(connection: &mut Connection) -> rusqlite::Result<()> {
                     PRIMARY KEY (run_id, sequence)
                 );
                 INSERT INTO recovery_events (run_id, sequence, position, action)
-                    SELECT run_id, rowid, position, action FROM recovery_events_legacy;
+                    SELECT legacy.run_id, legacy.rowid, legacy.position, legacy.action
+                    FROM recovery_events_legacy AS legacy
+                    WHERE EXISTS (SELECT 1 FROM runs WHERE id = legacy.run_id);
                 DROP TABLE recovery_events_legacy;
                 ",
             )?;
         }
+        transaction.execute(
+            "DELETE FROM run_steps WHERE NOT EXISTS (SELECT 1 FROM runs WHERE id = run_steps.run_id)",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM recovery_events
+             WHERE NOT EXISTS (SELECT 1 FROM runs WHERE id = recovery_events.run_id)",
+            [],
+        )?;
         transaction.commit()
     })();
     let restore_foreign_keys = connection.pragma_update(None, "foreign_keys", "ON");
-    migration.and(restore_foreign_keys)
+    migration?;
+    restore_foreign_keys?;
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    if statement.exists([])? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
+fn migrate_legacy_run_history(connection: &mut Connection) -> rusqlite::Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let legacy_runs = {
+        let mut statement = transaction.prepare("SELECT id, state_json FROM runs")?;
+        let runs = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        runs
+    };
+
+    for (run_id, state_json) in legacy_runs {
+        if serde_json::from_str::<StoredRun>(&state_json).is_ok() {
+            continue;
+        }
+        let stored = serde_json::from_str::<RunState>(&state_json)
+            .map(|state| StoredRun::from_state(&state))
+            .unwrap_or_else(|_| StoredRun {
+                policy: TransactionPolicy::AllOrNothing,
+                status: RunStatus::Failed,
+                steps: Vec::new(),
+                events: Vec::new(),
+            });
+        let sanitized_json =
+            serde_json::to_string(&stored).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        transaction.execute(
+            "UPDATE runs SET state_json = ?1 WHERE id = ?2",
+            params![sanitized_json, run_id],
+        )?;
+    }
+    transaction.commit()
 }
 
 fn flows_reference_connection_profiles(connection: &Connection) -> rusqlite::Result<bool> {

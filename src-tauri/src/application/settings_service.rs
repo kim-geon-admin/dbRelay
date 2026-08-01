@@ -70,7 +70,7 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
                 "connector kind does not match",
             ));
         }
-        let credential = self.credentials.resolve(&profile.id).await?;
+        let credential = self.resolve_credential(&profile).await?;
         let _session = connector.open(&profile, &credential).await?;
         Ok(())
     }
@@ -81,5 +81,25 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
 
     pub async fn disable_connection(&self, connection_id: &str) -> Result<(), PortError> {
         self.repository.disable_connection(connection_id).await
+    }
+
+    async fn resolve_credential(
+        &self,
+        profile: &ConnectionProfile,
+    ) -> Result<ResolvedSecret, PortError> {
+        match self.credentials.resolve(&profile.id).await {
+            Ok(credential) => Ok(credential),
+            Err(error)
+                if error.code() == "CREDENTIAL_NOT_FOUND"
+                    && profile.credential_ref != profile.id =>
+            {
+                let credential = self.credentials.resolve(&profile.credential_ref).await?;
+                self.credentials
+                    .store(&profile.id, credential.clone())
+                    .await?;
+                Ok(credential)
+            }
+            Err(error) => Err(error),
+        }
     }
 }

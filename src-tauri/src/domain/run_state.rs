@@ -84,12 +84,22 @@ impl RunError {
 
     pub fn history_code(&self) -> String {
         match self {
-            Self::Connector(error) => super::mask_sensitive_text(error.code()),
+            Self::Connector(error) if is_oracle_error_code(error.code()) => {
+                error.code().to_ascii_uppercase()
+            }
+            Self::Connector(_) => "CONNECTOR_ERROR".into(),
             Self::InvalidTransition { .. } => "INVALID_TRANSITION".into(),
             Self::InvalidStep { .. } => "INVALID_STEP".into(),
             Self::StepOutOfBounds { .. } => "STEP_OUT_OF_BOUNDS".into(),
         }
     }
+}
+
+fn is_oracle_error_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    bytes.len() == 9
+        && bytes[..4].eq_ignore_ascii_case(b"ORA-")
+        && bytes[4..].iter().all(u8::is_ascii_digit)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
