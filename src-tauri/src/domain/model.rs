@@ -15,6 +15,12 @@ pub enum CredentialStorage {
     Plaintext,
 }
 
+impl Default for CredentialStorage {
+    fn default() -> Self {
+        Self::Keyring
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConnectionProfile {
     pub id: String,

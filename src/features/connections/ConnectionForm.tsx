@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Connection, ConnectionSaveInput, DbKind } from "./connections.types";
+import type { Connection, ConnectionSaveInput, CredentialStorage, DbKind } from "./connections.types";
 
 type ConnectionFormProps = {
   connection?: Connection;
@@ -14,13 +14,13 @@ type FormState = {
   port: string;
   serviceName: string;
   username: string;
-  sourceReadOnly: boolean;
+  credentialStorage: CredentialStorage;
   password: string;
 };
-type TextField = Exclude<keyof FormState, "sourceReadOnly">;
+type TextField = Exclude<keyof FormState, "credentialStorage">;
 
 function blankForm(): FormState {
-  return { displayName: "", kind: "oracle", host: "", port: "1521", serviceName: "", username: "", sourceReadOnly: false, password: "" };
+  return { displayName: "", kind: "oracle", host: "", port: "1521", serviceName: "", username: "", credentialStorage: "keyring", password: "" };
 }
 
 function formFor(connection?: Connection): FormState {
@@ -32,8 +32,8 @@ function formFor(connection?: Connection): FormState {
     port: String(connection.port),
     serviceName: connection.serviceName,
     username: connection.username,
-    sourceReadOnly: connection.sourceReadOnly,
-    password: "",
+    credentialStorage: connection.credentialStorage,
+    password: connection.password ?? "",
   };
 }
 
@@ -70,11 +70,13 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
         id: connection?.id ?? connectionId(),
         displayName: values.displayName.trim(), kind: values.kind, host: values.host.trim(), port,
         serviceName: values.serviceName.trim(), username: values.username.trim(),
-        sourceReadOnly: values.sourceReadOnly,
+        credentialStorage: values.credentialStorage,
         ...(connection ? { enabled: connection.enabled } : {}),
         ...(values.password ? { password: values.password } : {}),
       });
-      setValues((current) => ({ ...current, password: "" }));
+      if (values.credentialStorage === "keyring") {
+        setValues((current) => ({ ...current, password: "" }));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Connection could not be saved.");
     } finally {
@@ -91,8 +93,8 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
       <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
       <label>Service name<input aria-label="Service name" value={values.serviceName} onChange={(event) => update("serviceName", event.target.value)} /></label>
       <label>Username<input aria-label="Username" value={values.username} onChange={(event) => update("username", event.target.value)} /></label>
-      <label><input aria-label="Source account is read-only" type="checkbox" checked={values.sourceReadOnly} onChange={(event) => update("sourceReadOnly", event.target.checked)} /> Source account is read-only</label>
-      <label>Password {connection ? <span className="field-hint">(leave blank to keep existing)</span> : null}<input aria-label="Password" type="password" autoComplete="new-password" value={values.password} onChange={(event) => update("password", event.target.value)} /></label>
+      <label><input aria-label="Encrypt password storage" type="checkbox" checked={values.credentialStorage === "keyring"} onChange={(event) => update("credentialStorage", event.target.checked ? "keyring" : "plaintext")} /> Encrypt password storage</label>
+      <label>Password<input aria-label="Password" type={values.credentialStorage === "keyring" ? "password" : "text"} autoComplete="new-password" value={values.password} onChange={(event) => update("password", event.target.value)} /></label>
       {error ? <p role="alert">{error}</p> : null}
       <div className="editor-actions">
         {onCancel ? <button type="button" onClick={onCancel}>Cancel</button> : null}

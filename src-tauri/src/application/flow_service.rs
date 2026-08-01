@@ -21,19 +21,13 @@ impl<R: FlowRepository + ?Sized> FlowService<R> {
                 "source and target connections must be different",
             ));
         }
-        let source = self
+        let _source = self
             .repository
             .load_connection(&flow.source_connection_id)
             .await?
             .ok_or_else(|| {
                 PortError::new("CONNECTION_NOT_FOUND", "source connection was not found")
             })?;
-        if !source.source_read_only {
-            return Err(PortError::new(
-                "SOURCE_READ_ONLY_REQUIRED",
-                "source connection must be designated for a read-only Oracle principal",
-            ));
-        }
         self.repository.save_flow(flow).await?;
         self.repository
             .load_flow(&flow.id)

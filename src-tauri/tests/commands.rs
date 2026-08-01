@@ -33,6 +33,7 @@ fn connection_request_debug_output_redacts_credential_material() {
         port: 1521,
         service_name: "ORCLPDB1".into(),
         username: "relay".into(),
+        credential_storage: CredentialStorage::Keyring,
         source_read_only: true,
         secret: "create-secret".into(),
     };
@@ -44,6 +45,7 @@ fn connection_request_debug_output_redacts_credential_material() {
         port: 1521,
         service_name: "ORCLPDB1".into(),
         username: "relay".into(),
+        credential_storage: CredentialStorage::Keyring,
         source_read_only: true,
         enabled: true,
         replacement_secret: Some("replacement-secret".into()),
@@ -65,6 +67,20 @@ fn connection_response_never_serializes_credential_material() {
     assert!(!json.contains("token"));
     assert!(!json.contains("credential_ref"));
     assert!(!json.contains("keyring://production-password"));
+}
+
+#[test]
+fn plaintext_connection_response_serializes_its_password() {
+    let response = ConnectionResponse::from(ConnectionProfile {
+        credential_storage: CredentialStorage::Plaintext,
+        plaintext_password: Some("visible-password".into()),
+        ..profile_with_secret_reference()
+    });
+
+    let json = serde_json::to_string(&response).unwrap();
+
+    assert!(json.contains("plaintext"));
+    assert!(json.contains("visible-password"));
 }
 
 #[test]

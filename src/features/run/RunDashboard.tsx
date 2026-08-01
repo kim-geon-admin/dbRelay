@@ -33,7 +33,7 @@ export function RunDashboard({ run: suppliedRun, initialFlows, initialConnection
   const flow = useMemo(() => flows.find((item) => item.id === flowId), [flowId, flows]);
   const source = connections.find((item) => item.id === flow?.sourceConnectionId);
   const target = connections.find((item) => item.id === flow?.targetConnectionId);
-  const preflightReady = Boolean(flow && source?.enabled && source.sourceReadOnly && target?.enabled && source.id !== target.id && flow.querySteps.every((step) => step.selectSql.trim() && step.upsertSql.trim()));
+  const preflightReady = Boolean(flow && source?.enabled && target?.enabled && source.id !== target.id && flow.querySteps.every((step) => step.selectSql.trim() && step.upsertSql.trim()));
   const elapsed = executionDurationMs === undefined ? "—" : `${Math.max(0, Math.round(executionDurationMs / 1000))}s`;
   const currentFailedStep = run ? failedStep(run) : undefined;
   const failedQuery = currentFailedStep === undefined ? undefined : flow?.querySteps[currentFailedStep];

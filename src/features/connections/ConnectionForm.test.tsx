@@ -16,3 +16,11 @@ it("does not submit a connection with an empty service name", () => {
   expect(screen.getByText("Service name is required.")).toBeVisible();
   expect(onSave).not.toHaveBeenCalled();
 });
+
+it("defaults to encrypted storage and removes the legacy connection controls", () => {
+  render(<ConnectionForm onSave={vi.fn()} />);
+
+  expect(screen.getByLabelText("Encrypt password storage")).toBeChecked();
+  expect(screen.queryByLabelText("Source account is read-only")).not.toBeInTheDocument();
+  expect(screen.queryByText("leave blank to keep existing")).not.toBeInTheDocument();
+});

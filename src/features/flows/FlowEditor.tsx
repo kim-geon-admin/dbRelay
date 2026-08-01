@@ -26,7 +26,6 @@ export function FlowEditor({ connections, initialFlow, onSave }: FlowEditorProps
     if (!flow.name.trim()) return setError("Flow name is required.");
     if (!flow.sourceConnectionId || !flow.targetConnectionId) return setError("Choose both source and target connections.");
     if (flow.sourceConnectionId === flow.targetConnectionId) return setError("Source and target connections must be different.");
-    if (!connections.find((connection) => connection.id === flow.sourceConnectionId)?.sourceReadOnly) return setError("Choose a source connection designated for a read-only Oracle principal.");
     if (!flow.querySteps.length) return setError("At least one query step is required.");
     if (flow.querySteps.some((step) => !step.selectSql.trim() || !step.upsertSql.trim())) return setError("Each query step needs source and target SQL.");
     setSaving(true);
@@ -38,7 +37,7 @@ export function FlowEditor({ connections, initialFlow, onSave }: FlowEditorProps
   return <form className="editor-form" onSubmit={submit} noValidate>
     <h2>{initialFlow ? "Edit flow" : "New flow"}</h2>
     <label>Flow name<input value={flow.name} onChange={(event) => setFlow({ ...flow, name: event.target.value })} /></label>
-    <label>Source connection<select value={flow.sourceConnectionId} onChange={(event) => setFlow({ ...flow, sourceConnectionId: event.target.value })}><option value="">Choose source</option>{connections.filter((connection) => connection.enabled && connection.sourceReadOnly).map((connection) => <option value={connection.id} key={connection.id}>{connection.displayName}</option>)}</select></label>
+    <label>Source connection<select value={flow.sourceConnectionId} onChange={(event) => setFlow({ ...flow, sourceConnectionId: event.target.value })}><option value="">Choose source</option>{connections.filter((connection) => connection.enabled).map((connection) => <option value={connection.id} key={connection.id}>{connection.displayName}</option>)}</select></label>
     <label>Target connection<select value={flow.targetConnectionId} onChange={(event) => setFlow({ ...flow, targetConnectionId: event.target.value })}><option value="">Choose target</option>{connections.filter((connection) => connection.enabled).map((connection) => <option value={connection.id} key={connection.id}>{connection.displayName}</option>)}</select></label>
     <label>Transaction policy<select value={flow.transactionPolicy} onChange={(event) => setFlow({ ...flow, transactionPolicy: event.target.value as TransactionPolicy })}><option value="all_or_nothing">All or nothing</option><option value="commit_successes">Commit successes</option></select></label>
     <div className="section-heading"><h3>Query steps</h3><button type="button" onClick={() => setFlow((current) => ({ ...current, querySteps: [...current.querySteps, newStep()] }))}>Add step</button></div>

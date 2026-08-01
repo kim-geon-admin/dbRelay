@@ -1,4 +1,5 @@
 export type DbKind = "oracle";
+export type CredentialStorage = "keyring" | "plaintext";
 
 export type Connection = {
   id: string;
@@ -8,7 +9,8 @@ export type Connection = {
   port: number;
   serviceName: string;
   username: string;
-  sourceReadOnly: boolean;
+  credentialStorage: CredentialStorage;
+  password?: string;
   enabled: boolean;
 };
 

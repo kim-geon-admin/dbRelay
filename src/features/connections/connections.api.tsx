@@ -16,7 +16,7 @@ export function saveConnection(input: ConnectionSaveInput): Promise<Connection> 
         port: input.port,
         serviceName: input.serviceName,
         username: input.username,
-        sourceReadOnly: input.sourceReadOnly,
+        credentialStorage: input.credentialStorage,
         secret: input.password ?? "",
       },
     });
@@ -31,7 +31,7 @@ export function saveConnection(input: ConnectionSaveInput): Promise<Connection> 
       port: input.port,
       serviceName: input.serviceName,
       username: input.username,
-      sourceReadOnly: input.sourceReadOnly,
+      credentialStorage: input.credentialStorage,
       enabled: input.enabled,
       replacementSecret: input.password || undefined,
     },

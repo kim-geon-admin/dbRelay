@@ -9,7 +9,7 @@ use crate::{
     },
     domain::{
         extract_named_binds, map_row, validate_row_set_columns, validate_source_statement,
-        validate_target_statement, ConnectionProfile, DbKind, Flow, RecoveryAction, RunError,
+        validate_target_statement, ConnectionProfile, CredentialStorage, DbKind, Flow, RecoveryAction, RunError,
         RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy,
     },
 };
@@ -265,20 +265,6 @@ impl<
                     .await
             }
         };
-
-        if !source_profile.source_read_only {
-            return self
-                .persist_preflight_failure(
-                    &flow,
-                    &run_id,
-                    0,
-                    RunError::connector(
-                        "SOURCE_READ_ONLY_REQUIRED",
-                        "source connection must be designated for a read-only Oracle principal",
-                    ),
-                )
-                .await;
-        }
 
         if source_profile.kind != self.connector.kind()
             || target_profile.kind != self.connector.kind()
@@ -891,12 +877,6 @@ impl<
                 "source and target connections must be different",
             ));
         }
-        if !source_profile.source_read_only {
-            return Err(RunError::connector(
-                "SOURCE_READ_ONLY_REQUIRED",
-                "source connection must be designated for a read-only Oracle principal",
-            ));
-        }
         if source_profile.kind != self.connector.kind()
             || target_profile.kind != self.connector.kind()
         {
@@ -1096,6 +1076,18 @@ impl<
         &self,
         profile: &ConnectionProfile,
     ) -> Result<ResolvedSecret, PortError> {
+        if profile.credential_storage == CredentialStorage::Plaintext {
+            return profile
+                .plaintext_password
+                .clone()
+                .map(ResolvedSecret::new)
+                .ok_or_else(|| {
+                    PortError::new(
+                        "CREDENTIAL_NOT_FOUND",
+                        "plaintext password was not found",
+                    )
+                });
+        }
         match self.credentials.resolve(&profile.credential_ref).await {
             Ok(secret) => Ok(secret),
             Err(error)

@@ -299,9 +299,7 @@ async fn runner_rejects_a_legacy_flow_with_identical_source_and_target_before_co
 }
 
 #[tokio::test]
-async fn runner_requires_a_source_profile_attested_as_read_only() {
-    // Would fail if a syntactically SELECT source were accepted without the
-    // database-principal policy that mitigates side-effecting Oracle functions.
+async fn runner_allows_a_source_profile_without_the_legacy_read_only_flag() {
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing);
     let mut source = harness.history.load_connection("source").unwrap();
     source.source_read_only = false;
@@ -309,8 +307,8 @@ async fn runner_requires_a_source_profile_attested_as_read_only() {
 
     let result = harness.runner.start(&harness.flow_id).await.unwrap();
 
-    assert_eq!(result.status, RunStatus::Failed);
-    assert!(harness.target_operations().is_empty());
+    assert_eq!(result.status, RunStatus::Completed);
+    assert!(!harness.target_operations().is_empty());
 }
 
 #[tokio::test]

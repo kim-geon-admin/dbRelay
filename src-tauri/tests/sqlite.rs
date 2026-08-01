@@ -64,6 +64,7 @@ impl RecordingCredentialStore {
             .expect("recording credential store lock poisoned")
             .clone()
     }
+
 }
 
 #[cfg(feature = "test-support")]
@@ -332,6 +333,46 @@ fn plaintext_connection_round_trips_its_explicit_password() {
     assert_eq!(loaded.credential_storage, CredentialStorage::Plaintext);
     assert_eq!(
         loaded.plaintext_password.as_deref(),
+        Some("visible-password")
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn testing_a_plaintext_connection_does_not_require_a_keyring_entry() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let profile = ConnectionProfile {
+        credential_storage: CredentialStorage::Plaintext,
+        plaintext_password: Some("visible-password".into()),
+        ..profile("source", "unused")
+    };
+    store.save_connection(&profile).unwrap();
+
+    SettingsService::new(store, Arc::new(RecordingCredentialStore::default()))
+        .test_connection("source", &AcceptingConnector)
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn saving_a_plaintext_connection_does_not_write_to_the_keyring() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let credentials = Arc::new(RecordingCredentialStore::default());
+    let profile = ConnectionProfile {
+        credential_storage: CredentialStorage::Plaintext,
+        plaintext_password: Some("visible-password".into()),
+        ..profile("source", "unused")
+    };
+
+    SettingsService::new(store.clone(), credentials.clone())
+        .save_connection(&profile, ResolvedSecret::for_test("visible-password"))
+        .await
+        .unwrap();
+
+    assert!(credentials.stored_connection_ids().is_empty());
+    assert_eq!(
+        store.load_connection("source").unwrap().plaintext_password.as_deref(),
         Some("visible-password")
     );
 }

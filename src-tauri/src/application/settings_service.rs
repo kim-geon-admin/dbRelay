@@ -6,7 +6,7 @@ use crate::{
     application::ports::{
         CredentialStore, DatabaseConnectorFactory, FlowRepository, PortError, ResolvedSecret,
     },
-    domain::ConnectionProfile,
+    domain::{ConnectionProfile, CredentialStorage},
 };
 
 pub struct SettingsService<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> {
@@ -27,6 +27,9 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
         profile: &ConnectionProfile,
         credential: ResolvedSecret,
     ) -> Result<(), PortError> {
+        if profile.credential_storage == CredentialStorage::Plaintext {
+            return self.repository.save_connection(profile).await;
+        }
         let mut persisted = profile.clone();
         persisted.credential_ref = credential_account(&profile.id);
         self.credentials
@@ -51,24 +54,66 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
             .ok_or_else(|| PortError::new("CONNECTION_NOT_FOUND", "connection not found"))?;
 
         let mut updated = profile.clone();
-        updated.credential_ref = existing.credential_ref.clone();
-        if let Some(credential) = replacement {
-            updated.credential_ref = credential_account(&updated.id);
-            self.credentials
-                .store(&updated.credential_ref, credential)
-                .await?;
-            if let Err(error) = self.repository.update_connection(&updated).await {
-                let _ = self.credentials.delete(&updated.credential_ref).await;
-                return Err(error);
+        match (existing.credential_storage, updated.credential_storage) {
+            (CredentialStorage::Plaintext, CredentialStorage::Plaintext) => {
+                updated.credential_ref = existing.credential_ref;
+                updated.plaintext_password = replacement
+                    .as_ref()
+                    .map(|credential| credential.expose().to_owned())
+                    .or(existing.plaintext_password);
+                self.repository.update_connection(&updated).await
             }
-            // Once metadata points at the replacement, cleanup failure can only
-            // leave an unreachable keyring entry; it cannot break the profile.
-            if existing.credential_ref != updated.credential_ref {
+            (CredentialStorage::Keyring, CredentialStorage::Plaintext) => {
+                let credential = replacement.ok_or_else(|| {
+                    PortError::new(
+                        "CREDENTIAL_REQUIRED",
+                        "a password is required when changing credential storage",
+                    )
+                })?;
+                updated.credential_ref = existing.credential_ref.clone();
+                updated.plaintext_password = Some(credential.expose().to_owned());
+                self.repository.update_connection(&updated).await?;
                 let _ = self.credentials.delete(&existing.credential_ref).await;
+                Ok(())
             }
-            return Ok(());
+            (CredentialStorage::Plaintext, CredentialStorage::Keyring) => {
+                let credential = replacement.ok_or_else(|| {
+                    PortError::new(
+                        "CREDENTIAL_REQUIRED",
+                        "a password is required when changing credential storage",
+                    )
+                })?;
+                updated.credential_ref = credential_account(&updated.id);
+                updated.plaintext_password = None;
+                self.credentials
+                    .store(&updated.credential_ref, credential)
+                    .await?;
+                if let Err(error) = self.repository.update_connection(&updated).await {
+                    let _ = self.credentials.delete(&updated.credential_ref).await;
+                    return Err(error);
+                }
+                Ok(())
+            }
+            (CredentialStorage::Keyring, CredentialStorage::Keyring) => {
+                updated.credential_ref = existing.credential_ref.clone();
+                updated.plaintext_password = None;
+                if let Some(credential) = replacement {
+                    updated.credential_ref = credential_account(&updated.id);
+                    self.credentials
+                        .store(&updated.credential_ref, credential)
+                        .await?;
+                    if let Err(error) = self.repository.update_connection(&updated).await {
+                        let _ = self.credentials.delete(&updated.credential_ref).await;
+                        return Err(error);
+                    }
+                    if existing.credential_ref != updated.credential_ref {
+                        let _ = self.credentials.delete(&existing.credential_ref).await;
+                    }
+                    return Ok(());
+                }
+                self.repository.update_connection(&updated).await
+            }
         }
-        self.repository.update_connection(&updated).await
     }
 
     pub async fn test_connection(
@@ -110,6 +155,18 @@ impl<R: FlowRepository + ?Sized, C: CredentialStore + ?Sized> SettingsService<R,
         &self,
         profile: &ConnectionProfile,
     ) -> Result<ResolvedSecret, PortError> {
+        if profile.credential_storage == CredentialStorage::Plaintext {
+            return profile
+                .plaintext_password
+                .clone()
+                .map(ResolvedSecret::new)
+                .ok_or_else(|| {
+                    PortError::new(
+                        "CREDENTIAL_NOT_FOUND",
+                        "plaintext password was not found",
+                    )
+                });
+        }
         match self.credentials.resolve(&profile.credential_ref).await {
             Ok(credential) => Ok(credential),
             Err(error)

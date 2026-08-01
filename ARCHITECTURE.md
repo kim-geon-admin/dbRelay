@@ -19,11 +19,11 @@ React UI -> Tauri command DTOs -> application services -> domain ports
 
 ## Boundary Rules
 
-Secrets reside only in Windows Credential Manager. SQLite stores only credential references and metadata. Commands return safe DTOs and never return passwords, tokens, SQL text, bind values, or source rows. Run-history persistence stores a safe recovery binding (flow ID/version, connection IDs, and non-secret configuration fingerprints), then reloads and verifies the live flow/profile before recovery rather than serializing the executable flow or credential references.
+By default, credentials reside in Windows Credential Manager and SQLite stores only references and metadata. An operator can explicitly choose plaintext password storage; only then does SQLite store and the connection command DTO return a password. Commands never return passwords for keyring connections, or SQL text, bind values, source rows, or execution credentials through run history. Run-history persistence stores a safe recovery binding (flow ID/version, connection IDs, and non-secret configuration fingerprints), then reloads and verifies the live flow/profile before recovery rather than serializing the executable flow or credential references.
 
 The Oracle connector maps `DATE` and timezone-free `TIMESTAMP` into structured domain values and uses oracle-rs typed batch binds. Capability preflight rejects ambiguous textual timestamps and timestamps with timezone offsets before target `begin`, because oracle-rs 0.1.7 writes those batch binds as plain timestamps.
 
-Oracle source sessions have no application-enforced read-only mode: oracle-rs 0.1.7 does not expose a supported read-only transaction/session API. A source profile therefore carries an explicit read-only-principal attestation, checked when saving and running a flow. Deployment must enforce it with a dedicated Oracle principal granted only the required `SELECT` privileges. SQL lexical validation is supplemental and cannot establish that a `SELECT` invoking user-defined functions is side-effect free.
+Oracle source sessions have no application-enforced read-only mode: oracle-rs 0.1.7 does not expose a supported read-only transaction/session API. Deployments should enforce source safety with a dedicated Oracle principal granted only the required `SELECT` privileges. SQL lexical validation is supplemental and cannot establish that a `SELECT` invoking user-defined functions is side-effect free.
 
 ## Enforced Architecture Checks
 

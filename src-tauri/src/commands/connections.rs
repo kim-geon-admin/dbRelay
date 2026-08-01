@@ -20,6 +20,9 @@ pub struct ConnectionRequest {
     pub port: u16,
     pub service_name: String,
     pub username: String,
+    #[serde(default)]
+    pub credential_storage: CredentialStorage,
+    #[serde(default)]
     pub source_read_only: bool,
     pub secret: String,
 }
@@ -34,6 +37,9 @@ pub struct UpdateConnectionRequest {
     pub port: u16,
     pub service_name: String,
     pub username: String,
+    #[serde(default)]
+    pub credential_storage: CredentialStorage,
+    #[serde(default)]
     pub source_read_only: bool,
     pub enabled: bool,
     pub replacement_secret: Option<String>,
@@ -91,6 +97,9 @@ pub struct ConnectionResponse {
     pub port: u16,
     pub service_name: String,
     pub username: String,
+    pub credential_storage: CredentialStorage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
     pub source_read_only: bool,
     pub enabled: bool,
 }
@@ -105,6 +114,10 @@ impl From<ConnectionProfile> for ConnectionResponse {
             port: profile.port,
             service_name: profile.service_name,
             username: profile.username,
+            credential_storage: profile.credential_storage,
+            password: (profile.credential_storage == CredentialStorage::Plaintext)
+                .then_some(profile.plaintext_password)
+                .flatten(),
             source_read_only: profile.source_read_only,
             enabled: profile.enabled,
         }
@@ -223,8 +236,9 @@ impl ConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: self.id.clone(),
-            credential_storage: CredentialStorage::Keyring,
-            plaintext_password: None,
+            credential_storage: self.credential_storage,
+            plaintext_password: (self.credential_storage == CredentialStorage::Plaintext)
+                .then_some(self.secret.clone()),
             enabled: true,
             source_read_only: self.source_read_only,
         })
@@ -250,8 +264,10 @@ impl UpdateConnectionRequest {
             service_name: self.service_name.clone(),
             username: self.username.clone(),
             credential_ref: String::new(),
-            credential_storage: CredentialStorage::Keyring,
-            plaintext_password: None,
+            credential_storage: self.credential_storage,
+            plaintext_password: (self.credential_storage == CredentialStorage::Plaintext)
+                .then_some(self.replacement_secret.clone())
+                .flatten(),
             enabled: self.enabled,
             source_read_only: self.source_read_only,
         })
