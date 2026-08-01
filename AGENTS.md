@@ -29,3 +29,5 @@ pnpm tauri build
 ```
 
 Keep behavior test-first. Do not expose credentials, bind values, or source rows in UI data, logs, or history.
+
+Run `cargo test --manifest-path src-tauri/Cargo.toml --test architecture` when changing command, domain, connector, or infrastructure boundaries. The structural tests prohibit generic SQL commands and domain-to-infrastructure dependencies.

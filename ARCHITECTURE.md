@@ -20,3 +20,12 @@ React UI -> Tauri command DTOs -> application services -> domain ports
 ## Boundary Rules
 
 Secrets reside only in Windows Credential Manager. SQLite stores only credential references and metadata. Commands return safe DTOs and never return passwords, tokens, bind values, or source rows.
+
+## Enforced Architecture Checks
+
+`src-tauri/tests/architecture.rs` protects two release boundaries:
+
+- Tauri commands may expose only typed application operations; they must not expose generic arbitrary-SQL execution.
+- Domain modules must not depend on infrastructure modules.
+
+The Windows CI workflow runs these checks together with Rust formatting, Clippy, all Rust tests, and the frontend lint, tests, and production builds.
