@@ -46,6 +46,7 @@ impl CredentialStore for CredentialsNotUsed {
 struct RecordingCredentialStore {
     stored_connection_ids: Mutex<Vec<String>>,
     deleted_connection_ids: Mutex<Vec<String>>,
+    secrets: Mutex<std::collections::BTreeMap<String, ResolvedSecret>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -68,16 +69,25 @@ impl RecordingCredentialStore {
 #[cfg(feature = "test-support")]
 #[async_trait]
 impl CredentialStore for RecordingCredentialStore {
-    async fn store(&self, connection_id: &str, _secret: ResolvedSecret) -> Result<(), PortError> {
+    async fn store(&self, connection_id: &str, secret: ResolvedSecret) -> Result<(), PortError> {
         self.stored_connection_ids
             .lock()
             .expect("recording credential store lock poisoned")
             .push(connection_id.into());
+        self.secrets
+            .lock()
+            .expect("recording credential store lock poisoned")
+            .insert(connection_id.into(), secret);
         Ok(())
     }
 
-    async fn resolve(&self, _connection_id: &str) -> Result<ResolvedSecret, PortError> {
-        unreachable!("connection testing was not requested")
+    async fn resolve(&self, connection_id: &str) -> Result<ResolvedSecret, PortError> {
+        self.secrets
+            .lock()
+            .expect("recording credential store lock poisoned")
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| PortError::new("CREDENTIAL_NOT_FOUND", "credential reference not found"))
     }
 
     async fn delete(&self, connection_id: &str) -> Result<(), PortError> {
@@ -85,6 +95,10 @@ impl CredentialStore for RecordingCredentialStore {
             .lock()
             .expect("recording credential store lock poisoned")
             .push(connection_id.into());
+        self.secrets
+            .lock()
+            .expect("recording credential store lock poisoned")
+            .remove(connection_id);
         Ok(())
     }
 }
@@ -239,6 +253,7 @@ fn profile(id: &str, credential_ref: &str) -> ConnectionProfile {
         username: "relay".into(),
         credential_ref: credential_ref.into(),
         enabled: true,
+        source_read_only: true,
     }
 }
 
@@ -285,6 +300,19 @@ fn saving_a_flow_persists_references_but_never_a_password() {
     assert!(!store
         .dump_for_test()
         .contains("correct-horse-battery-staple"));
+}
+
+#[test]
+fn listing_connections_returns_the_source_read_only_attestation() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut source = profile("source", "credential://db-relay/source");
+    source.source_read_only = false;
+    store.save_connection(&source).unwrap();
+
+    let connections = store.list_connections().unwrap();
+
+    assert_eq!(connections.len(), 1);
+    assert!(!connections[0].source_read_only);
 }
 
 #[test]
@@ -912,6 +940,39 @@ fn opening_a_legacy_stored_run_resanitizes_an_arbitrary_connector_code() {
 }
 
 #[test]
+fn normalizing_legacy_commit_pending_marks_the_indoubt_run_as_ended() {
+    let path = std::env::temp_dir().join(format!(
+        "db-relay-legacy-commit-pending-{}-{}.sqlite",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            r#"
+            CREATE TABLE runs (id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL);
+            INSERT INTO runs VALUES (
+                'legacy-commit-pending',
+                '{"policy":"all_or_nothing","status":{"commit_pending":{"step":0}},"steps":[{"status":{"succeeded":{"affected_rows":1}}}],"events":[]}'
+            );
+            "#,
+        )
+        .unwrap();
+    drop(legacy);
+
+    let store = SqliteStore::open(&path).unwrap();
+    let entry = store.list_runs().unwrap().pop().unwrap();
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+
+    assert!(matches!(entry.state.status(), RunStatus::InDoubt { .. }));
+    assert!(entry.ended_at_ms.is_some());
+}
+
+#[test]
 fn opening_a_legacy_bound_run_rewrites_its_raw_configuration_as_safe_binding() {
     let path = std::env::temp_dir().join(format!(
         "db-relay-legacy-binding-{}-{}.sqlite",
@@ -964,6 +1025,39 @@ async fn settings_service_uses_a_versioned_keyring_account_for_new_metadata() {
         credentials.stored_connection_ids(),
         [persisted.credential_ref]
     );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn replacement_credential_is_persisted_before_the_old_key_is_deleted() {
+    // Would fail if SQLite silently restored the old credential_ref after the
+    // replacement key was stored, leaving the profile unable to resolve the
+    // supplied replacement.
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let credentials = Arc::new(RecordingCredentialStore::default());
+    let service = SettingsService::new(store.clone(), credentials.clone());
+    let initial_profile = profile("source", "legacy-ref");
+
+    service
+        .save_connection(&initial_profile, ResolvedSecret::for_test("old-secret"))
+        .await
+        .unwrap();
+    let old_ref = store.load_connection("source").unwrap().credential_ref;
+    let mut update = profile("source", "ignored-by-service");
+    update.display_name = "Updated source".into();
+
+    service
+        .update_connection(
+            &update,
+            Some(ResolvedSecret::for_test("replacement-secret")),
+        )
+        .await
+        .unwrap();
+
+    let persisted = store.load_connection("source").unwrap();
+    assert_ne!(persisted.credential_ref, old_ref);
+    assert!(credentials.resolve(&persisted.credential_ref).await.is_ok());
+    assert_eq!(credentials.deleted_connection_ids(), vec![old_ref]);
 }
 
 #[cfg(feature = "test-support")]

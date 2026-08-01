@@ -201,6 +201,20 @@ impl<
             .ok_or_else(|| StartRunError::new("FLOW_NOT_FOUND", "flow not found"))?;
         let run_id = self.run_id(&flow);
 
+        if flow.source_connection_id == flow.target_connection_id {
+            return self
+                .persist_preflight_failure(
+                    &flow,
+                    &run_id,
+                    0,
+                    RunError::connector(
+                        "CONNECTIONS_NOT_DISTINCT",
+                        "source and target connections must be different",
+                    ),
+                )
+                .await;
+        }
+
         let source_profile = match self
             .flows
             .load_runnable_connection(&flow.source_connection_id)
@@ -251,6 +265,20 @@ impl<
                     .await
             }
         };
+
+        if !source_profile.source_read_only {
+            return self
+                .persist_preflight_failure(
+                    &flow,
+                    &run_id,
+                    0,
+                    RunError::connector(
+                        "SOURCE_READ_ONLY_REQUIRED",
+                        "source connection must be designated for a read-only Oracle principal",
+                    ),
+                )
+                .await;
+        }
 
         if source_profile.kind != self.connector.kind()
             || target_profile.kind != self.connector.kind()
@@ -375,7 +403,7 @@ impl<
                         })?;
                     None
                 }
-                Err(error) => Some(run_error(error)),
+                Err(error) => Some(run_execution_error(error, batch)),
             };
 
             if let Some(error) = failure {
@@ -780,7 +808,7 @@ impl<
         target
             .execute_named(&step.upsert_sql, batch)
             .await
-            .map_err(run_error)
+            .map_err(|error| run_execution_error(error, batch))
     }
 
     async fn prepare_step_batch(
@@ -788,7 +816,10 @@ impl<
         source: &mut Box<dyn DatabaseSession>,
         step: &crate::domain::QueryStep,
     ) -> Result<Vec<crate::domain::NamedRow>, RunError> {
-        let rows = source.query(&step.select_sql).await.map_err(run_error)?;
+        let rows = source
+            .query(&step.select_sql)
+            .await
+            .map_err(run_source_query_error)?;
         let binds = extract_named_binds(&step.upsert_sql).map_err(|_| {
             RunError::connector(
                 "MAPPING_INVALID",
@@ -854,6 +885,18 @@ impl<
     ) -> Result<(Box<dyn DatabaseSession>, Box<dyn DatabaseSession>), RunError> {
         let source_profile = &binding.source_profile;
         let target_profile = &binding.target_profile;
+        if source_profile.id == target_profile.id {
+            return Err(RunError::connector(
+                "CONNECTIONS_NOT_DISTINCT",
+                "source and target connections must be different",
+            ));
+        }
+        if !source_profile.source_read_only {
+            return Err(RunError::connector(
+                "SOURCE_READ_ONLY_REQUIRED",
+                "source connection must be designated for a read-only Oracle principal",
+            ));
+        }
         if source_profile.kind != self.connector.kind()
             || target_profile.kind != self.connector.kind()
         {
@@ -1076,6 +1119,27 @@ impl<
 
 fn run_error(error: PortError) -> RunError {
     RunError::connector_with_retryable(error.code(), error.message(), error.retryable())
+}
+
+/// Driver execution errors can embed rendered bind rows. Keep only stable
+/// diagnostic metadata at the application boundary so batch values never
+/// reach run responses, the UI, or persisted history.
+fn run_execution_error(error: PortError, _batch: &[crate::domain::NamedRow]) -> RunError {
+    RunError::connector_with_retryable(
+        error.code(),
+        "target execution failed; inspect the database server audit log",
+        error.retryable(),
+    )
+}
+
+/// Source query failures can include driver-rendered source values (for
+/// example from a failing function), so use the same deterministic boundary.
+fn run_source_query_error(error: PortError) -> RunError {
+    RunError::connector_with_retryable(
+        error.code(),
+        "source query failed; inspect the database server audit log",
+        error.retryable(),
+    )
 }
 
 fn validate_step_policy(kind: DbKind, step: &crate::domain::QueryStep) -> Result<(), RunError> {

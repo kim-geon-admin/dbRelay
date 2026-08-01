@@ -15,6 +15,25 @@ impl<R: FlowRepository + ?Sized> FlowService<R> {
     }
 
     pub async fn save_flow(&self, flow: &Flow) -> Result<Flow, PortError> {
+        if flow.source_connection_id == flow.target_connection_id {
+            return Err(PortError::new(
+                "CONNECTIONS_NOT_DISTINCT",
+                "source and target connections must be different",
+            ));
+        }
+        let source = self
+            .repository
+            .load_connection(&flow.source_connection_id)
+            .await?
+            .ok_or_else(|| {
+                PortError::new("CONNECTION_NOT_FOUND", "source connection was not found")
+            })?;
+        if !source.source_read_only {
+            return Err(PortError::new(
+                "SOURCE_READ_ONLY_REQUIRED",
+                "source connection must be designated for a read-only Oracle principal",
+            ));
+        }
         self.repository.save_flow(flow).await?;
         self.repository
             .load_flow(&flow.id)

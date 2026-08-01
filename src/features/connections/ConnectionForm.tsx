@@ -14,11 +14,13 @@ type FormState = {
   port: string;
   serviceName: string;
   username: string;
+  sourceReadOnly: boolean;
   password: string;
 };
+type TextField = Exclude<keyof FormState, "sourceReadOnly">;
 
 function blankForm(): FormState {
-  return { displayName: "", kind: "oracle", host: "", port: "1521", serviceName: "", username: "", password: "" };
+  return { displayName: "", kind: "oracle", host: "", port: "1521", serviceName: "", username: "", sourceReadOnly: false, password: "" };
 }
 
 function formFor(connection?: Connection): FormState {
@@ -30,6 +32,7 @@ function formFor(connection?: Connection): FormState {
     port: String(connection.port),
     serviceName: connection.serviceName,
     username: connection.username,
+    sourceReadOnly: connection.sourceReadOnly,
     password: "",
   };
 }
@@ -45,14 +48,14 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
 
   useEffect(() => setValues(formFor(connection)), [connection]);
 
-  const update = (field: keyof FormState, value: string) => {
+  const update = <K extends keyof FormState>(field: K, value: FormState[K]) => {
     setValues((current) => ({ ...current, [field]: value }));
     setError(undefined);
   };
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const required: Array<[keyof FormState, string]> = [
+    const required: Array<[TextField, string]> = [
       ["displayName", "Display name"], ["host", "Host"], ["serviceName", "Service name"], ["username", "Username"],
     ];
     const missing = required.find(([field]) => !values[field].trim());
@@ -67,6 +70,7 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
         id: connection?.id ?? connectionId(),
         displayName: values.displayName.trim(), kind: values.kind, host: values.host.trim(), port,
         serviceName: values.serviceName.trim(), username: values.username.trim(),
+        sourceReadOnly: values.sourceReadOnly,
         ...(connection ? { enabled: connection.enabled } : {}),
         ...(values.password ? { password: values.password } : {}),
       });
@@ -82,11 +86,12 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
     <form className="editor-form" onSubmit={submit} noValidate>
       <h2>{connection ? "Edit connection" : "New connection"}</h2>
       <label>Display name<input aria-label="Display name" value={values.displayName} onChange={(event) => update("displayName", event.target.value)} /></label>
-      <label>Database kind<select aria-label="Database kind" value={values.kind} onChange={(event) => update("kind", event.target.value)}><option value="oracle">Oracle</option></select></label>
+      <label>Database kind<select aria-label="Database kind" value={values.kind} onChange={(event) => update("kind", event.target.value as DbKind)}><option value="oracle">Oracle</option></select></label>
       <label>Host<input aria-label="Host" value={values.host} onChange={(event) => update("host", event.target.value)} /></label>
       <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
       <label>Service name<input aria-label="Service name" value={values.serviceName} onChange={(event) => update("serviceName", event.target.value)} /></label>
       <label>Username<input aria-label="Username" value={values.username} onChange={(event) => update("username", event.target.value)} /></label>
+      <label><input aria-label="Source account is read-only" type="checkbox" checked={values.sourceReadOnly} onChange={(event) => update("sourceReadOnly", event.target.checked)} /> Source account is read-only</label>
       <label>Password {connection ? <span className="field-hint">(leave blank to keep existing)</span> : null}<input aria-label="Password" type="password" autoComplete="new-password" value={values.password} onChange={(event) => update("password", event.target.value)} /></label>
       {error ? <p role="alert">{error}</p> : null}
       <div className="editor-actions">
@@ -96,4 +101,3 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
     </form>
   );
 }
-

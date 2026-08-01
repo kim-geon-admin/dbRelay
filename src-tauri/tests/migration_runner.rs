@@ -65,6 +65,7 @@ async fn factory_sessions_are_isolated_while_the_observer_keeps_each_open_log() 
         username: "scott".into(),
         credential_ref: "credential://source".into(),
         enabled: true,
+        source_read_only: true,
     };
 
     let mut first = factory.open(&profile, &secret).await.unwrap();
@@ -241,6 +242,73 @@ async fn ambiguous_timestamp_bind_is_rejected_during_preflight_before_target_beg
         [RunEvent::StepFailed { error, .. }]
             if error.history_code() == "CONNECTOR_ERROR"
     ));
+}
+
+#[tokio::test]
+async fn execution_error_never_returns_or_persists_a_supplied_batch_value() {
+    // Would fail if target driver text is copied into the run snapshot before
+    // supplied bind values are removed.
+    let batch_value = "batch-value-that-must-not-leak";
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(0, RowSet::single([("ID", Value::Text(batch_value.into()))]))
+        .source_rows_for_step(1, rows_for_address())
+        .target_fails_on_step_with_error(
+            0,
+            PortError::new("ORA-00001", format!("driver rejected value {batch_value}")),
+        );
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert!(!format!("{result:?}").contains(batch_value));
+    assert!(!harness.history.dump_for_test().contains(batch_value));
+}
+
+#[tokio::test]
+async fn source_query_error_never_returns_or_persists_a_source_value() {
+    let source_value = "source-value-that-must-not-leak";
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing);
+    harness.connector.fail_source_query_with(
+        0,
+        PortError::new(
+            "ORA-20001",
+            format!("source function failed for {source_value}"),
+        ),
+    );
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert!(!format!("{result:?}").contains(source_value));
+    assert!(!harness.history.dump_for_test().contains(source_value));
+}
+
+#[tokio::test]
+async fn runner_rejects_a_legacy_flow_with_identical_source_and_target_before_connector_work() {
+    // Would fail if only the flow-editor command rejected this invalid flow,
+    // allowing an older persisted flow to open a connector twice.
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing);
+    let mut legacy = harness.history.load_flow(&harness.flow_id).unwrap();
+    legacy.target_connection_id = legacy.source_connection_id.clone();
+    harness.history.save_flow(&legacy).unwrap();
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(harness.target_operations().is_empty());
+}
+
+#[tokio::test]
+async fn runner_requires_a_source_profile_attested_as_read_only() {
+    // Would fail if a syntactically SELECT source were accepted without the
+    // database-principal policy that mitigates side-effecting Oracle functions.
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing);
+    let mut source = harness.history.load_connection("source").unwrap();
+    source.source_read_only = false;
+    harness.history.save_connection(&source).unwrap();
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(harness.target_operations().is_empty());
 }
 
 #[tokio::test]
@@ -1055,6 +1123,7 @@ fn connection_profile(id: &str, credential_ref: &str) -> ConnectionProfile {
         username: "relay".into(),
         credential_ref: credential_ref.into(),
         enabled: true,
+        source_read_only: true,
     }
 }
 
@@ -1110,11 +1179,15 @@ impl RunnerConnectorFactory {
     }
 
     fn fail_source_query_at(&self, query: usize) {
+        self.fail_source_query_with(query, PortError::new("FAKE_SOURCE", "source query failed"));
+    }
+
+    fn fail_source_query_with(&self, query: usize, error: PortError) {
         self.state
             .source_failures
             .lock()
             .unwrap()
-            .insert(query, PortError::new("FAKE_SOURCE", "source query failed"));
+            .insert(query, error);
     }
 
     fn fail_target_step(&self, step: usize, error: PortError) {

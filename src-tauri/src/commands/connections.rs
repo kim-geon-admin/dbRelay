@@ -20,6 +20,7 @@ pub struct ConnectionRequest {
     pub port: u16,
     pub service_name: String,
     pub username: String,
+    pub source_read_only: bool,
     pub secret: String,
 }
 
@@ -33,6 +34,7 @@ pub struct UpdateConnectionRequest {
     pub port: u16,
     pub service_name: String,
     pub username: String,
+    pub source_read_only: bool,
     pub enabled: bool,
     pub replacement_secret: Option<String>,
 }
@@ -89,6 +91,7 @@ pub struct ConnectionResponse {
     pub port: u16,
     pub service_name: String,
     pub username: String,
+    pub source_read_only: bool,
     pub enabled: bool,
 }
 
@@ -102,6 +105,7 @@ impl From<ConnectionProfile> for ConnectionResponse {
             port: profile.port,
             service_name: profile.service_name,
             username: profile.username,
+            source_read_only: profile.source_read_only,
             enabled: profile.enabled,
         }
     }
@@ -220,6 +224,7 @@ impl ConnectionRequest {
             username: self.username.clone(),
             credential_ref: self.id.clone(),
             enabled: true,
+            source_read_only: self.source_read_only,
         })
     }
 }
@@ -244,6 +249,7 @@ impl UpdateConnectionRequest {
             username: self.username.clone(),
             credential_ref: String::new(),
             enabled: self.enabled,
+            source_read_only: self.source_read_only,
         })
     }
 }

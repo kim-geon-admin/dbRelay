@@ -17,6 +17,7 @@ fn profile_with_secret_reference() -> ConnectionProfile {
         username: "relay".into(),
         credential_ref: "keyring://production-password".into(),
         enabled: true,
+        source_read_only: true,
     }
 }
 
@@ -30,6 +31,7 @@ fn connection_request_debug_output_redacts_credential_material() {
         port: 1521,
         service_name: "ORCLPDB1".into(),
         username: "relay".into(),
+        source_read_only: true,
         secret: "create-secret".into(),
     };
     let update = UpdateConnectionRequest {
@@ -40,6 +42,7 @@ fn connection_request_debug_output_redacts_credential_material() {
         port: 1521,
         service_name: "ORCLPDB1".into(),
         username: "relay".into(),
+        source_read_only: true,
         enabled: true,
         replacement_secret: Some("replacement-secret".into()),
     };

@@ -29,6 +29,12 @@ Connection metadata and flow definitions are stored locally in SQLite. Passwords
 
 Oracle `DATE` and timezone-free `TIMESTAMP` source values are carried as typed Oracle binds. Ambiguous textual timestamps and timestamps with an offset are rejected during preflight before a target transaction opens; `oracle-rs` 0.1.7 batch binding does not preserve the latter's timezone representation.
 
+## Source-account safety policy
+
+Every source connection must be explicitly marked **Source account is read-only** before a flow can be saved or run. This is an operator attestation, not a driver-enforced session mode: `oracle-rs` 0.1.7 exposes query, execute, commit, and rollback operations but no supported API for an Oracle read-only session or `SET TRANSACTION READ ONLY`. Configure the selected Oracle source principal itself with only the minimum `SELECT` grants required by the flow, and do not grant DML, DDL, transaction-control, or executable routine privileges that could mutate data.
+
+The application's `SELECT`/`WITH` validation is a defense-in-depth syntax check only. It cannot prove that an Oracle function called inside a `SELECT` has no side effects; database principal privileges are the enforcement boundary.
+
 ## Verification
 
 Run the release checks from the repository root:

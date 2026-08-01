@@ -338,6 +338,7 @@ fn profile() -> ConnectionProfile {
         username: "relay".into(),
         credential_ref: "credential://oracle-test".into(),
         enabled: true,
+        source_read_only: true,
     }
 }
 
@@ -375,6 +376,7 @@ fn oracle_test_connection() -> Option<(ConnectionProfile, String)> {
             username: username.into(),
             credential_ref: "credential://oracle-integration".into(),
             enabled: true,
+            source_read_only: true,
         },
         password.into(),
     ))

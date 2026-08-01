@@ -24,7 +24,7 @@ it("does not render recovery controls for an all-or-nothing failure", () => {
 
 it("disables dashboard controls while recovery owns the keyboard", () => {
   const flow = { id: "flow-1", name: "Flow", sourceConnectionId: "source", targetConnectionId: "target", transactionPolicy: "commit_successes" as const, version: 0, querySteps: [{ id: "step-1", selectSql: "SELECT 1", upsertSql: "MERGE" }] };
-  const connections = [{ id: "source", displayName: "Source", kind: "oracle" as const, host: "a", port: 1, serviceName: "a", username: "a", enabled: true }, { id: "target", displayName: "Target", kind: "oracle" as const, host: "b", port: 1, serviceName: "b", username: "b", enabled: true }];
+  const connections = [{ id: "source", displayName: "Source", kind: "oracle" as const, host: "a", port: 1, serviceName: "a", username: "a", sourceReadOnly: true, enabled: true }, { id: "target", displayName: "Target", kind: "oracle" as const, host: "b", port: 1, serviceName: "b", username: "b", sourceReadOnly: false, enabled: true }];
   const waiting: Run = { runId: "run-5", policy: "commit_successes", status: { awaiting_recovery: { failed_step: 0 } }, steps: ["failed"], events: [] };
   render(<RunDashboard run={waiting} initialFlows={[flow]} initialConnections={connections} />);
 
@@ -37,7 +37,7 @@ it("freezes duration when the backend execution response completes", async () =>
   let resolveRun!: (run: Run) => void;
   startRun.mockReturnValueOnce(new Promise<Run>((resolve) => { resolveRun = resolve; }));
   const flow = { id: "flow-1", name: "Flow", sourceConnectionId: "source", targetConnectionId: "target", transactionPolicy: "commit_successes" as const, version: 0, querySteps: [{ id: "step-1", selectSql: "SELECT 1", upsertSql: "MERGE" }] };
-  const connections = [{ id: "source", displayName: "Source", kind: "oracle" as const, host: "a", port: 1, serviceName: "a", username: "a", enabled: true }, { id: "target", displayName: "Target", kind: "oracle" as const, host: "b", port: 1, serviceName: "b", username: "b", enabled: true }];
+  const connections = [{ id: "source", displayName: "Source", kind: "oracle" as const, host: "a", port: 1, serviceName: "a", username: "a", sourceReadOnly: true, enabled: true }, { id: "target", displayName: "Target", kind: "oracle" as const, host: "b", port: 1, serviceName: "b", username: "b", sourceReadOnly: false, enabled: true }];
   const view = render(<RunDashboard initialFlows={[flow]} initialConnections={connections} />);
   fireEvent.click(screen.getByRole("button", { name: "Run" }));
   vi.setSystemTime(new Date("2026-08-01T00:00:05Z"));
@@ -54,7 +54,7 @@ it("disables Run while its invocation is in flight", () => {
   let resolveRun!: (run: Run) => void;
   startRun.mockReturnValueOnce(new Promise<Run>((resolve) => { resolveRun = resolve; }));
   const flow = { id: "flow-1", name: "Flow", sourceConnectionId: "source", targetConnectionId: "target", transactionPolicy: "commit_successes" as const, version: 0, querySteps: [{ id: "step-1", selectSql: "SELECT 1", upsertSql: "MERGE" }] };
-  const connections = [{ id: "source", displayName: "Source", kind: "oracle" as const, host: "a", port: 1, serviceName: "a", username: "a", enabled: true }, { id: "target", displayName: "Target", kind: "oracle" as const, host: "b", port: 1, serviceName: "b", username: "b", enabled: true }];
+  const connections = [{ id: "source", displayName: "Source", kind: "oracle" as const, host: "a", port: 1, serviceName: "a", username: "a", sourceReadOnly: true, enabled: true }, { id: "target", displayName: "Target", kind: "oracle" as const, host: "b", port: 1, serviceName: "b", username: "b", sourceReadOnly: false, enabled: true }];
   render(<RunDashboard initialFlows={[flow]} initialConnections={connections} />);
 
   fireEvent.click(screen.getByRole("button", { name: "Run" }));

@@ -19,6 +19,10 @@ pub struct ConnectionProfile {
     pub username: String,
     pub credential_ref: String,
     pub enabled: bool,
+    /// Operator attestation that this connection uses an Oracle principal
+    /// restricted to read-only access when it is selected as a flow source.
+    #[serde(default)]
+    pub source_read_only: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

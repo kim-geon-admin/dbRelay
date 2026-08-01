@@ -308,7 +308,8 @@ impl SqliteStore {
                     service_name TEXT NOT NULL,
                     username TEXT NOT NULL,
                     credential_ref TEXT NOT NULL,
-                    enabled INTEGER NOT NULL
+                    enabled INTEGER NOT NULL,
+                    source_read_only INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS flows (
                     id TEXT PRIMARY KEY NOT NULL,
@@ -360,8 +361,8 @@ impl SqliteStore {
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO connection_profiles
-                    (id, display_name, kind, host, port, service_name, username, credential_ref, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    (id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(id) DO UPDATE SET
                     display_name = excluded.display_name,
                     kind = excluded.kind,
@@ -370,7 +371,8 @@ impl SqliteStore {
                     service_name = excluded.service_name,
                     username = excluded.username,
                     credential_ref = excluded.credential_ref,
-                    enabled = excluded.enabled",
+                    enabled = excluded.enabled,
+                    source_read_only = excluded.source_read_only",
                 params![
                     profile.id,
                     profile.display_name,
@@ -381,6 +383,7 @@ impl SqliteStore {
                     profile.username,
                     profile.credential_ref,
                     profile.enabled as i64,
+                    profile.source_read_only as i64,
                 ],
             )?;
             Ok(())
@@ -419,7 +422,7 @@ impl SqliteStore {
     pub fn list_connections(&self) -> Result<Vec<ConnectionProfile>, PortError> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled
+                "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only
                  FROM connection_profiles ORDER BY display_name, id",
             )?;
             let profiles = statement
@@ -937,7 +940,7 @@ impl SqliteStore {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled
+                    "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only
                      FROM connection_profiles WHERE id = ?1",
                     [connection_id],
                     connection_from_row,
@@ -1013,7 +1016,7 @@ impl FlowRepository for SqliteStore {
     }
 
     async fn update_connection(&self, profile: &ConnectionProfile) -> Result<(), PortError> {
-        self.update_connection_without_credential(profile)
+        SqliteStore::save_connection(self, profile)
     }
 
     async fn disable_connection(&self, connection_id: &str) -> Result<(), PortError> {
@@ -1239,7 +1242,7 @@ fn load_connection_from_connection(
 ) -> rusqlite::Result<Option<ConnectionProfile>> {
     connection
         .query_row(
-            "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled
+            "SELECT id, display_name, kind, host, port, service_name, username, credential_ref, enabled, source_read_only
              FROM connection_profiles WHERE id = ?1",
             [connection_id],
             connection_from_row,
@@ -1258,6 +1261,7 @@ fn connection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionPr
         username: row.get(6)?,
         credential_ref: row.get(7)?,
         enabled: row.get(8)?,
+        source_read_only: row.get(9)?,
     })
 }
 
@@ -1384,6 +1388,12 @@ fn is_terminal_run(status: RunStatus) -> bool {
 }
 
 fn migrate_run_history_columns(connection: &mut Connection) -> rusqlite::Result<()> {
+    if !table_has_column(connection, "connection_profiles", "source_read_only")? {
+        connection.execute(
+            "ALTER TABLE connection_profiles ADD COLUMN source_read_only INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     if !table_has_column(connection, "runs", "started_at_ms")? {
         connection.execute(
             "ALTER TABLE runs ADD COLUMN started_at_ms INTEGER NOT NULL DEFAULT 0",
@@ -1514,8 +1524,18 @@ fn migrate_legacy_run_history(connection: &mut Connection) -> rusqlite::Result<(
         let sanitized_json =
             serde_json::to_string(&stored).map_err(|_| rusqlite::Error::InvalidQuery)?;
         transaction.execute(
-            "UPDATE runs SET state_json = ?1 WHERE id = ?2",
-            params![sanitized_json, run_id],
+            "UPDATE runs SET state_json = ?1,
+                ended_at_ms = CASE
+                  WHEN ended_at_ms IS NULL AND ?2 THEN ?3
+                  ELSE ended_at_ms
+                END
+             WHERE id = ?4",
+            params![
+                sanitized_json,
+                is_terminal_run(stored.status.clone()),
+                now_unix_ms(),
+                run_id
+            ],
         )?;
     }
     transaction.commit()

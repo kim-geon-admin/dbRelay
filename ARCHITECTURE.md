@@ -23,6 +23,8 @@ Secrets reside only in Windows Credential Manager. SQLite stores only credential
 
 The Oracle connector maps `DATE` and timezone-free `TIMESTAMP` into structured domain values and uses oracle-rs typed batch binds. Capability preflight rejects ambiguous textual timestamps and timestamps with timezone offsets before target `begin`, because oracle-rs 0.1.7 writes those batch binds as plain timestamps.
 
+Oracle source sessions have no application-enforced read-only mode: oracle-rs 0.1.7 does not expose a supported read-only transaction/session API. A source profile therefore carries an explicit read-only-principal attestation, checked when saving and running a flow. Deployment must enforce it with a dedicated Oracle principal granted only the required `SELECT` privileges. SQL lexical validation is supplemental and cannot establish that a `SELECT` invoking user-defined functions is side-effect free.
+
 ## Enforced Architecture Checks
 
 `src-tauri/tests/architecture.rs` protects two release boundaries:

@@ -8,6 +8,7 @@ export type Connection = {
   port: number;
   serviceName: string;
   username: string;
+  sourceReadOnly: boolean;
   enabled: boolean;
 };
 
@@ -20,4 +21,3 @@ export type ConnectionTestResult = {
   connectionId: string;
   connected: boolean;
 };
-

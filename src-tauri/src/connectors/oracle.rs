@@ -345,12 +345,8 @@ impl OracleDriverSession for OracleRsSession {
         let unsupported_bind_columns = result
             .columns
             .iter()
-            .filter_map(|column| match column.oracle_type {
-                oracle_rs::OracleType::TimestampTz | oracle_rs::OracleType::TimestampLtz => {
-                    Some(column.name.clone())
-                }
-                _ => None,
-            })
+            .filter(|column| !is_lossless_bind_type(&column.oracle_type))
+            .map(|column| column.name.clone())
             .collect();
         let rows = result
             .rows
@@ -360,14 +356,10 @@ impl OracleDriverSession for OracleRsSession {
                     row.into_values()
                         .into_iter()
                         .enumerate()
-                        .map(|(index, value)| {
-                            (
-                                names
-                                    .get(index)
-                                    .cloned()
-                                    .unwrap_or_else(|| index.to_string()),
-                                domain_value(value),
-                            )
+                        .filter_map(|(index, value)| {
+                            domain_value(value).and_then(|value| {
+                                names.get(index).cloned().map(|name| (name, value))
+                            })
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -457,13 +449,31 @@ fn oracle_value(value: DriverValue) -> oracle_rs::Value {
     }
 }
 
-fn domain_value(value: oracle_rs::Value) -> Value {
-    match value {
+fn is_lossless_bind_type(value: &oracle_rs::OracleType) -> bool {
+    matches!(
+        value,
+        oracle_rs::OracleType::Varchar
+            | oracle_rs::OracleType::Number
+            | oracle_rs::OracleType::BinaryInteger
+            | oracle_rs::OracleType::Long
+            | oracle_rs::OracleType::Date
+            | oracle_rs::OracleType::Raw
+            | oracle_rs::OracleType::LongRaw
+            | oracle_rs::OracleType::Char
+            | oracle_rs::OracleType::Timestamp
+            | oracle_rs::OracleType::Boolean
+    )
+}
+
+/// Converts only values with a lossless target batch-bind representation.
+/// Unsupported source values are omitted rather than stringified; metadata
+/// identifies their columns so only target binds that use them are rejected.
+fn domain_value(value: oracle_rs::Value) -> Option<Value> {
+    Some(match value {
         oracle_rs::Value::Null => Value::Null,
         oracle_rs::Value::String(value) => Value::Text(value),
         oracle_rs::Value::Bytes(value) => Value::Bytes(value),
         oracle_rs::Value::Integer(value) => Value::Int(value),
-        oracle_rs::Value::Float(value) => Value::Decimal(value.to_string()),
         oracle_rs::Value::Number(value) => Value::Decimal(value.as_str().to_owned()),
         oracle_rs::Value::Boolean(value) => Value::Bool(value),
         oracle_rs::Value::Date(value) => Value::OracleDate(OracleDate {
@@ -485,8 +495,14 @@ fn domain_value(value: oracle_rs::Value) -> Value {
             tz_hour_offset: value.tz_hour_offset,
             tz_minute_offset: value.tz_minute_offset,
         }),
-        other => Value::Text(other.to_string()),
-    }
+        oracle_rs::Value::Float(_)
+        | oracle_rs::Value::RowId(_)
+        | oracle_rs::Value::Lob(_)
+        | oracle_rs::Value::Json(_)
+        | oracle_rs::Value::Vector(_)
+        | oracle_rs::Value::Cursor(_)
+        | oracle_rs::Value::Collection(_) => return None,
+    })
 }
 
 fn oracle_error(error: oracle_rs::Error) -> DriverError {
@@ -601,5 +617,17 @@ mod tests {
         let value = oracle_value(DriverValue::Decimal("123.45".into()));
 
         assert!(matches!(value, oracle_rs::Value::Number(number) if number.as_str() == "123.45"));
+    }
+
+    #[test]
+    fn unsupported_oracle_values_are_not_coerced_to_placeholder_text() {
+        // Would fail if an Oracle value with no lossless target bind mapping
+        // were stringified and then treated as a valid text bind.
+        assert_eq!(
+            domain_value(oracle_rs::Value::Json(
+                serde_json::json!({ "opaque": true })
+            )),
+            None
+        );
     }
 }
