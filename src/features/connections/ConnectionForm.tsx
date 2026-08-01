@@ -92,7 +92,7 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
       <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
       <label>Service name<input aria-label="Service name" value={values.serviceName} onChange={(event) => update("serviceName", event.target.value)} /></label>
       <label>Username<input aria-label="Username" value={values.username} onChange={(event) => update("username", event.target.value)} /></label>
-      <label>Password<input aria-label="Password" type="password" autoComplete="new-password" value={values.password} onFocus={() => {
+      <label>Password<input aria-label="Password" type={connection && !passwordChanged ? "text" : "password"} autoComplete="new-password" value={values.password} onFocus={() => {
         if (connection && !passwordChanged) {
           setValues((current) => ({ ...current, password: "" }));
           setPasswordChanged(true);

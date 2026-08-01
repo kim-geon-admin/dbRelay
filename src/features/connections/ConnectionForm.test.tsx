@@ -23,7 +23,9 @@ it("shows a saved password as stars without a checkbox", () => {
     serviceName: "ORCLPDB1", username: "relay", credentialStorage: "keyring", passwordMask: "********", enabled: true,
   } as never} onSave={vi.fn()} />);
 
-  expect(screen.getByLabelText("Password")).toHaveValue("********");
+  const password = screen.getByLabelText("Password");
+  expect(password).toHaveAttribute("type", "text");
+  expect(password).toHaveValue("********");
   expect(screen.queryByLabelText("Encrypt password storage")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Source account is read-only")).not.toBeInTheDocument();
 });
