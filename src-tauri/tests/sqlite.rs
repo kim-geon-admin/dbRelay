@@ -340,6 +340,30 @@ fn saving_a_stale_flow_version_is_rejected_without_overwriting_the_current_flow(
     assert_eq!(store.load_flow("daily-sync").unwrap().version, 2);
 }
 
+#[test]
+fn saving_a_client_preincremented_flow_version_is_rejected_without_overwriting() {
+    let store = SqliteStore::in_memory().unwrap();
+    store
+        .save_connection(&profile("source", "credential://db-relay/source"))
+        .unwrap();
+    store
+        .save_connection(&profile("target", "credential://db-relay/target"))
+        .unwrap();
+    store
+        .save_flow(&flow_referencing("source", "target"))
+        .unwrap();
+
+    let mut stale = store.load_flow("daily-sync").unwrap();
+    stale.version = 2;
+    stale.name = "Stale update".into();
+    let error = store.save_flow(&stale).unwrap_err();
+
+    assert_eq!(error.code(), "FLOW_VERSION_CONFLICT");
+    let saved = store.load_flow("daily-sync").unwrap();
+    assert_eq!(saved.name, "Daily sync");
+    assert_eq!(saved.version, 1);
+}
+
 #[tokio::test]
 async fn updating_a_connection_without_a_replacement_keeps_its_credential_reference() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());

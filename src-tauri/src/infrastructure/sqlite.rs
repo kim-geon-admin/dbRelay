@@ -408,13 +408,11 @@ impl SqliteStore {
                 .optional()
                 .map_err(sqlite_error)?;
             let next_version = match current_version {
-                // The command path supplies the currently observed version;
-                // older in-process recovery callers supplied the next one.
-                // Both remain monotonic and are protected by this transaction.
+                // Ordinary saves supply the version the client observed. The
+                // database advances it atomically after the comparison.
                 Some(version) if version == flow.version => version.checked_add(1).ok_or_else(|| {
                     PortError::new("FLOW_VERSION_INVALID", "flow version cannot be advanced")
                 })?,
-                Some(version) if flow.version == version.saturating_add(1) => flow.version,
                 Some(_) => {
                     return Err(PortError::new(
                         "FLOW_VERSION_CONFLICT",

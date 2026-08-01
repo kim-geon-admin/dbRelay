@@ -459,7 +459,6 @@ async fn recovery_rejects_a_flow_changed_after_the_run_paused() {
     changed_flow.transaction_policy = TransactionPolicy::AllOrNothing;
     changed_flow.query_steps[0].upsert_sql =
         "merge changed_customer using dual on (id = :ID)".into();
-    changed_flow.version += 1;
     harness.history.save_flow(&changed_flow).unwrap();
 
     let error = harness
@@ -513,7 +512,6 @@ async fn recovery_rejects_a_change_that_interleaves_after_preliminary_validation
     let operations_before_recovery = harness.target_operations();
     let mut changed_flow = harness.history.load_flow(&harness.flow_id).unwrap();
     changed_flow.query_steps[0].upsert_sql = "merge raced_customer using dual on (id = :ID)".into();
-    changed_flow.version += 1;
     let flows = Arc::new(InterleavingFlowRepository::after_target_profile_read(
         harness.history.clone(),
         changed_flow,
