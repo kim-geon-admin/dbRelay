@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -8,7 +10,7 @@ use crate::{
 
 use super::{ApplicationContainer, CommandErrorDto};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionRequest {
     pub id: String,
@@ -21,7 +23,7 @@ pub struct ConnectionRequest {
     pub secret: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateConnectionRequest {
     pub id: String,
@@ -33,6 +35,42 @@ pub struct UpdateConnectionRequest {
     pub username: String,
     pub enabled: bool,
     pub replacement_secret: Option<String>,
+}
+
+impl fmt::Debug for ConnectionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionRequest")
+            .field("id", &self.id)
+            .field("display_name", &self.display_name)
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("service_name", &self.service_name)
+            .field("username", &self.username)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl fmt::Debug for UpdateConnectionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UpdateConnectionRequest")
+            .field("id", &self.id)
+            .field("display_name", &self.display_name)
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("service_name", &self.service_name)
+            .field("username", &self.username)
+            .field("enabled", &self.enabled)
+            .field(
+                "replacement_secret",
+                &self.replacement_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

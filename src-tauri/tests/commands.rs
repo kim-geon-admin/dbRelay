@@ -1,5 +1,7 @@
 use db_relay::{
-    commands::{ConnectionResponse, RunHistoryResponse},
+    commands::{
+        ConnectionRequest, ConnectionResponse, RunHistoryResponse, UpdateConnectionRequest,
+    },
     domain::{ConnectionProfile, DbKind, RunStatus, StepStatus},
 };
 
@@ -15,6 +17,36 @@ fn profile_with_secret_reference() -> ConnectionProfile {
         credential_ref: "keyring://production-password".into(),
         enabled: true,
     }
+}
+
+#[test]
+fn connection_request_debug_output_redacts_credential_material() {
+    let create = ConnectionRequest {
+        id: "production".into(),
+        display_name: "Production".into(),
+        kind: DbKind::Oracle,
+        host: "db.example.test".into(),
+        port: 1521,
+        service_name: "ORCLPDB1".into(),
+        username: "relay".into(),
+        secret: "create-secret".into(),
+    };
+    let update = UpdateConnectionRequest {
+        id: "production".into(),
+        display_name: "Production".into(),
+        kind: DbKind::Oracle,
+        host: "db.example.test".into(),
+        port: 1521,
+        service_name: "ORCLPDB1".into(),
+        username: "relay".into(),
+        enabled: true,
+        replacement_secret: Some("replacement-secret".into()),
+    };
+
+    let debug = format!("{create:?} {update:?}");
+
+    assert!(!debug.contains("create-secret"));
+    assert!(!debug.contains("replacement-secret"));
 }
 
 #[test]
