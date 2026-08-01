@@ -1,11 +1,13 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use oracle_rs::{BatchBinds, Config, Connection};
 
 use crate::{
     application::ports::{DatabaseConnectorFactory, DatabaseSession, PortError, ResolvedSecret},
-    domain::{extract_named_binds, ConnectionProfile, DbKind, NamedRow, Row, RowSet, Value},
+    domain::{
+        extract_named_bind_occurrences, ConnectionProfile, DbKind, NamedRow, Row, RowSet, Value,
+    },
 };
 
 /// Oracle implementation of the application's connector ports.
@@ -15,12 +17,14 @@ use crate::{
 #[derive(Clone)]
 pub struct OracleConnector {
     driver: Arc<dyn OracleDriver>,
+    test_bind_widths: Option<Arc<Mutex<Vec<usize>>>>,
 }
 
 impl Default for OracleConnector {
     fn default() -> Self {
         Self {
             driver: Arc::new(OracleRsDriver),
+            test_bind_widths: None,
         }
     }
 }
@@ -29,8 +33,13 @@ impl OracleConnector {
     /// Test-only connector implementation that does not open a network socket.
     #[doc(hidden)]
     pub fn for_test() -> Self {
+        let test_bind_widths = Arc::new(Mutex::new(Vec::new()));
         Self {
-            driver: Arc::new(TestOracleDriver::default()),
+            driver: Arc::new(TestOracleDriver {
+                test_bind_widths: Arc::clone(&test_bind_widths),
+                failure: None,
+            }),
+            test_bind_widths: Some(test_bind_widths),
         }
     }
 
@@ -41,14 +50,17 @@ impl OracleConnector {
         message: impl Into<String>,
         retryable: bool,
     ) -> Self {
+        let test_bind_widths = Arc::new(Mutex::new(Vec::new()));
         Self {
             driver: Arc::new(TestOracleDriver {
+                test_bind_widths: Arc::clone(&test_bind_widths),
                 failure: Some(DriverError {
                     code: code.into(),
                     message: message.into(),
                     retryable,
                 }),
             }),
+            test_bind_widths: Some(test_bind_widths),
         }
     }
 
@@ -61,6 +73,19 @@ impl OracleConnector {
         password: &str,
     ) -> Result<Box<dyn DatabaseSession>, PortError> {
         self.open_with_password(profile, password).await
+    }
+
+    #[doc(hidden)]
+    pub fn test_bind_widths(&self) -> Vec<usize> {
+        self.test_bind_widths
+            .as_ref()
+            .map(|widths| {
+                widths
+                    .lock()
+                    .expect("test bind observer lock poisoned")
+                    .clone()
+            })
+            .unwrap_or_default()
     }
 
     async fn open_with_password(
@@ -140,7 +165,7 @@ impl DatabaseSession for OracleSession {
             return Ok(0);
         }
 
-        let bind_names = extract_named_binds(sql)
+        let bind_names = extract_named_bind_occurrences(sql)
             .map_err(|_| PortError::new("BIND_MAPPING", "unable to read named bind parameters"))?;
         let batch = batch
             .iter()
@@ -174,7 +199,8 @@ fn bind_row(row: &NamedRow, bind_names: &[String]) -> Result<Vec<DriverValue>, P
         .map(|bind_name| {
             row.iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case(bind_name))
-                .map(|(_, value)| DriverValue::from(value))
+                .map(|(_, value)| DriverValue::try_from(value))
+                .transpose()?
                 .ok_or_else(|| {
                     PortError::new(
                         "BIND_MAPPING",
@@ -192,20 +218,24 @@ enum DriverValue {
     Int(i64),
     Decimal(String),
     Bool(bool),
-    Timestamp(String),
     Bytes(Vec<u8>),
 }
 
-impl From<&Value> for DriverValue {
-    fn from(value: &Value) -> Self {
+impl TryFrom<&Value> for DriverValue {
+    type Error = PortError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Null => Self::Null,
-            Value::Text(value) => Self::Text(value.clone()),
-            Value::Int(value) => Self::Int(*value),
-            Value::Decimal(value) => Self::Decimal(value.clone()),
-            Value::Bool(value) => Self::Bool(*value),
-            Value::Timestamp(value) => Self::Timestamp(value.clone()),
-            Value::Bytes(value) => Self::Bytes(value.clone()),
+            Value::Null => Ok(Self::Null),
+            Value::Text(value) => Ok(Self::Text(value.clone())),
+            Value::Int(value) => Ok(Self::Int(*value)),
+            Value::Decimal(value) => Ok(Self::Decimal(value.clone())),
+            Value::Bool(value) => Ok(Self::Bool(*value)),
+            Value::Timestamp(_) => Err(PortError::new(
+                "BIND_TYPE_UNSUPPORTED",
+                "timestamp values require a structured timestamp representation",
+            )),
+            Value::Bytes(value) => Ok(Self::Bytes(value.clone())),
         }
     }
 }
@@ -371,8 +401,9 @@ impl OracleDriverSession for OracleRsSession {
 fn oracle_value(value: DriverValue) -> oracle_rs::Value {
     match value {
         DriverValue::Null => oracle_rs::Value::Null,
-        DriverValue::Text(value) | DriverValue::Decimal(value) | DriverValue::Timestamp(value) => {
-            oracle_rs::Value::String(value)
+        DriverValue::Text(value) => oracle_rs::Value::String(value),
+        DriverValue::Decimal(value) => {
+            oracle_rs::Value::Number(oracle_rs::types::OracleNumber::new(value))
         }
         DriverValue::Int(value) => oracle_rs::Value::Integer(value),
         DriverValue::Bool(value) => oracle_rs::Value::Boolean(value),
@@ -421,8 +452,8 @@ fn oracle_error(error: oracle_rs::Error) -> DriverError {
     }
 }
 
-#[derive(Default)]
 struct TestOracleDriver {
+    test_bind_widths: Arc<Mutex<Vec<usize>>>,
     failure: Option<DriverError>,
 }
 
@@ -433,12 +464,14 @@ impl OracleDriver for TestOracleDriver {
         _connection: DriverConnectionInfo<'_>,
     ) -> Result<Box<dyn OracleDriverSession>, DriverError> {
         Ok(Box::new(TestOracleSession {
+            test_bind_widths: Arc::clone(&self.test_bind_widths),
             failure: self.failure.clone(),
         }))
     }
 }
 
 struct TestOracleSession {
+    test_bind_widths: Arc<Mutex<Vec<usize>>>,
     failure: Option<DriverError>,
 }
 
@@ -458,6 +491,10 @@ impl OracleDriverSession for TestOracleSession {
         _bind_names: &[String],
         batch: &[Vec<DriverValue>],
     ) -> Result<u64, DriverError> {
+        self.test_bind_widths
+            .lock()
+            .expect("test bind observer lock poisoned")
+            .extend(batch.iter().map(Vec::len));
         self.failure.clone().map_or(Ok(batch.len() as u64), Err)
     }
 
@@ -495,5 +532,12 @@ mod tests {
 
         assert_eq!(error.code, "ORA-00001");
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn converts_decimal_values_to_native_oracle_numbers() {
+        let value = oracle_value(DriverValue::Decimal("123.45".into()));
+
+        assert!(matches!(value, oracle_rs::Value::Number(number) if number.as_str() == "123.45"));
     }
 }

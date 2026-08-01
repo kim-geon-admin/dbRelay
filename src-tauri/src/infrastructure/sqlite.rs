@@ -34,10 +34,25 @@ struct StoredRun {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 enum StoredRunEvent {
-    StepSucceeded { step: usize, affected_rows: u64 },
-    StepFailed { step: usize, error_code: String },
-    TransactionFailed { error_code: String },
-    RecoveryApplied { step: usize, action: RecoveryAction },
+    StepSucceeded {
+        step: usize,
+        affected_rows: u64,
+    },
+    StepFailed {
+        step: usize,
+        error_code: String,
+        #[serde(default)]
+        retryable: bool,
+    },
+    TransactionFailed {
+        error_code: String,
+        #[serde(default)]
+        retryable: bool,
+    },
+    RecoveryApplied {
+        step: usize,
+        action: RecoveryAction,
+    },
 }
 
 impl StoredRun {
@@ -82,7 +97,7 @@ impl StoredRun {
         for event in &mut self.events {
             match event {
                 StoredRunEvent::StepFailed { error_code, .. }
-                | StoredRunEvent::TransactionFailed { error_code } => {
+                | StoredRunEvent::TransactionFailed { error_code, .. } => {
                     *error_code =
                         RunError::connector(std::mem::take(error_code), "").history_code();
                 }
@@ -106,9 +121,11 @@ impl StoredRunEvent {
             RunEvent::StepFailed { step, error } => Self::StepFailed {
                 step: *step,
                 error_code: error.history_code(),
+                retryable: error.retryable(),
             },
             RunEvent::TransactionFailed { error } => Self::TransactionFailed {
                 error_code: error.history_code(),
+                retryable: error.retryable(),
             },
             RunEvent::RecoveryApplied { step, action } => Self::RecoveryApplied {
                 step: *step,
@@ -126,12 +143,27 @@ impl StoredRunEvent {
                 step,
                 affected_rows,
             },
-            Self::StepFailed { step, error_code } => RunEvent::StepFailed {
+            Self::StepFailed {
                 step,
-                error: RunError::connector(error_code, "sanitized persisted run error"),
+                error_code,
+                retryable,
+            } => RunEvent::StepFailed {
+                step,
+                error: RunError::connector_with_retryable(
+                    error_code,
+                    "sanitized persisted run error",
+                    retryable,
+                ),
             },
-            Self::TransactionFailed { error_code } => RunEvent::TransactionFailed {
-                error: RunError::connector(error_code, "sanitized persisted run error"),
+            Self::TransactionFailed {
+                error_code,
+                retryable,
+            } => RunEvent::TransactionFailed {
+                error: RunError::connector_with_retryable(
+                    error_code,
+                    "sanitized persisted run error",
+                    retryable,
+                ),
             },
             Self::RecoveryApplied { step, action } => RunEvent::RecoveryApplied { step, action },
         }

@@ -48,6 +48,47 @@ async fn adapter_executes_named_batches_and_delegates_transactions() {
 }
 
 #[tokio::test]
+async fn adapter_expands_repeated_named_placeholders_in_sql_occurrence_order() {
+    let connector = OracleConnector::for_test();
+    let mut session = connector
+        .open_for_test(&profile(), "test-secret")
+        .await
+        .unwrap();
+
+    session
+        .execute_named(
+            "update relay_test set a = :VALUE, b = :VALUE",
+            &[named_row([("VALUE", Value::Int(7))])],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(connector.test_bind_widths(), vec![2]);
+}
+
+#[tokio::test]
+async fn adapter_rejects_ambiguous_timestamp_strings_before_oracle_execution() {
+    let connector = OracleConnector::for_test();
+    let mut session = connector
+        .open_for_test(&profile(), "test-secret")
+        .await
+        .unwrap();
+
+    let error = session
+        .execute_named(
+            "update relay_test set happened_at = :HAPPENED_AT",
+            &[named_row([(
+                "HAPPENED_AT",
+                Value::Timestamp("2026-08-01 12:30:00".into()),
+            )])],
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "BIND_TYPE_UNSUPPORTED");
+}
+
+#[tokio::test]
 async fn adapter_preserves_oracle_error_codes_and_masks_messages() {
     let connector = OracleConnector::for_test_with_failure(
         "ORA-00001",

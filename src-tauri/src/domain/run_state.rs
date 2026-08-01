@@ -64,6 +64,14 @@ impl RunError {
         Self::Connector(ConnectorError::new(code, message))
     }
 
+    pub fn connector_with_retryable(
+        code: impl Into<String>,
+        message: impl AsRef<str>,
+        retryable: bool,
+    ) -> Self {
+        Self::Connector(ConnectorError::with_retryable(code, message, retryable))
+    }
+
     pub fn connector_with_credential_values(
         code: impl Into<String>,
         message: impl AsRef<str>,
@@ -81,6 +89,10 @@ impl RunError {
             Self::Connector(error) => Some(error.message()),
             _ => None,
         }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Connector(error) if error.retryable())
     }
 
     pub fn history_code(&self) -> String {
@@ -107,6 +119,7 @@ fn is_oracle_error_code(code: &str) -> bool {
 pub struct ConnectorError {
     code: String,
     message: String,
+    retryable: bool,
 }
 
 impl ConnectorError {
@@ -114,6 +127,15 @@ impl ConnectorError {
         Self {
             code: code.into(),
             message: super::mask_sensitive_text(message.as_ref()),
+            retryable: false,
+        }
+    }
+
+    fn with_retryable(code: impl Into<String>, message: impl AsRef<str>, retryable: bool) -> Self {
+        Self {
+            code: code.into(),
+            message: super::mask_sensitive_text(message.as_ref()),
+            retryable,
         }
     }
 
@@ -131,6 +153,7 @@ impl ConnectorError {
                     .map(Into::into)
                     .collect::<Vec<_>>(),
             ),
+            retryable: false,
         }
     }
 
@@ -140,6 +163,10 @@ impl ConnectorError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.retryable
     }
 }
 
@@ -152,10 +179,16 @@ impl<'de> Deserialize<'de> for ConnectorError {
         struct WireError {
             code: String,
             message: String,
+            #[serde(default)]
+            retryable: bool,
         }
 
         let wire = WireError::deserialize(deserializer)?;
-        Ok(Self::new(wire.code, wire.message))
+        Ok(Self::with_retryable(
+            wire.code,
+            wire.message,
+            wire.retryable,
+        ))
     }
 }
 

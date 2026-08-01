@@ -3,9 +3,25 @@ use std::collections::HashSet;
 use super::{MappingError, NamedRow, Row};
 
 pub fn extract_named_binds(sql: &str) -> Result<Vec<String>, MappingError> {
-    let bytes = sql.as_bytes();
     let mut binds = Vec::new();
     let mut seen = HashSet::new();
+
+    for bind in extract_named_bind_occurrences(sql)? {
+        if seen.insert(bind.to_ascii_uppercase()) {
+            binds.push(bind);
+        }
+    }
+
+    Ok(binds)
+}
+
+/// Returns every named bind in source order, retaining repeated placeholders.
+///
+/// [`extract_named_binds`] remains the deduplicated mapping contract. Drivers
+/// that bind positionally use this occurrence-preserving variant instead.
+pub fn extract_named_bind_occurrences(sql: &str) -> Result<Vec<String>, MappingError> {
+    let bytes = sql.as_bytes();
+    let mut binds = Vec::new();
     let mut index = 0;
 
     while index < bytes.len() {
@@ -26,9 +42,7 @@ pub fn extract_named_binds(sql: &str) -> Result<Vec<String>, MappingError> {
                     }
 
                     let bind = &sql[start..end];
-                    if seen.insert(bind.to_ascii_uppercase()) {
-                        binds.push(bind.into());
-                    }
+                    binds.push(bind.into());
                     index = end;
                 } else {
                     index += 1;

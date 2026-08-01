@@ -36,6 +36,7 @@ impl RunSnapshot {
 pub struct StartRunError {
     code: String,
     message: String,
+    retryable: bool,
 }
 
 impl StartRunError {
@@ -43,6 +44,7 @@ impl StartRunError {
         Self {
             code: error.code().into(),
             message: error.message().into(),
+            retryable: error.retryable(),
         }
     }
 
@@ -50,6 +52,7 @@ impl StartRunError {
         Self {
             code: code.into(),
             message: crate::domain::mask_sensitive_text(&message.into()),
+            retryable: false,
         }
     }
 
@@ -59,6 +62,10 @@ impl StartRunError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.retryable
     }
 }
 
@@ -89,6 +96,7 @@ pub enum RecoveryRequest {
 pub struct RecoveryError {
     code: String,
     message: String,
+    retryable: bool,
 }
 
 impl RecoveryError {
@@ -96,6 +104,7 @@ impl RecoveryError {
         Self {
             code: error.code().into(),
             message: error.message().into(),
+            retryable: error.retryable(),
         }
     }
 
@@ -103,6 +112,7 @@ impl RecoveryError {
         Self {
             code: code.into(),
             message: crate::domain::mask_sensitive_text(&message.into()),
+            retryable: false,
         }
     }
 
@@ -112,6 +122,10 @@ impl RecoveryError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.retryable
     }
 }
 
@@ -125,7 +139,11 @@ impl std::error::Error for RecoveryError {}
 
 impl From<StartRunError> for RecoveryError {
     fn from(error: StartRunError) -> Self {
-        Self::new(error.code, error.message)
+        Self {
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
+        }
     }
 }
 
@@ -741,21 +759,21 @@ impl<
             ));
         }
         let source_secret = self
-            .resolve_credential(&source_profile)
+            .resolve_credential(source_profile)
             .await
             .map_err(run_error)?;
         let target_secret = self
-            .resolve_credential(&target_profile)
+            .resolve_credential(target_profile)
             .await
             .map_err(run_error)?;
         let source = self
             .connector
-            .open(&source_profile, &source_secret)
+            .open(source_profile, &source_secret)
             .await
             .map_err(run_error)?;
         let target = self
             .connector
-            .open(&target_profile, &target_secret)
+            .open(target_profile, &target_secret)
             .await
             .map_err(run_error)?;
         Ok((source, target))
@@ -913,7 +931,7 @@ impl<
 }
 
 fn run_error(error: PortError) -> RunError {
-    RunError::connector(error.code(), error.message())
+    RunError::connector_with_retryable(error.code(), error.message(), error.retryable())
 }
 
 fn recovery_state_error(error: RunError) -> RecoveryError {

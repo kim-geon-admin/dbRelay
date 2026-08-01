@@ -503,6 +503,28 @@ async fn persisted_execution_error_never_contains_a_secret() {
 }
 
 #[tokio::test]
+async fn retryable_connector_errors_survive_runner_and_history_round_trip() {
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(0, rows_for_customer())
+        .source_rows_for_step(1, rows_for_address())
+        .target_fails_on_step_with_error(
+            0,
+            PortError::with_retryable("ORA-03113", "end-of-file on communication channel", true),
+        );
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+    let state = harness.history.load_run(&result.run_id).unwrap().unwrap();
+
+    assert!(matches!(
+        state.events().first(),
+        Some(RunEvent::StepFailed {
+            error: RunError::Connector(error),
+            ..
+        }) if error.code() == "ORA-03113" && error.retryable()
+    ));
+}
+
+#[tokio::test]
 async fn commit_failure_rolls_back_once_and_persists_the_sanitized_native_error() {
     let secret = "commit-secret-fixture";
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)

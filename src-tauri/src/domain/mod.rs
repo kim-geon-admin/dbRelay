@@ -5,7 +5,7 @@ mod run_state;
 
 pub use error_masking::mask_sensitive_text;
 pub(crate) use error_masking::mask_sensitive_text_with_values;
-pub use mapping::{extract_named_binds, map_row};
+pub use mapping::{extract_named_bind_occurrences, extract_named_binds, map_row};
 pub use model::{
     ConnectionProfile, DbKind, Flow, MappingError, NamedRow, QueryStep, Row, RowSet,
     TransactionPolicy, Value,
