@@ -61,6 +61,10 @@ pub enum Value {
 pub struct Row(Vec<(String, Value)>);
 
 impl Row {
+    pub fn from_columns(columns: Vec<(String, Value)>) -> Self {
+        Self(columns)
+    }
+
     pub fn normalized_index(&self) -> Result<HashMap<String, Value>, MappingError> {
         let mut columns = HashMap::with_capacity(self.0.len());
 

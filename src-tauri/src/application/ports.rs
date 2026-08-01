@@ -26,6 +26,7 @@ pub enum BoundRecoveryApply {
 pub struct PortError {
     code: String,
     message: String,
+    retryable: bool,
 }
 
 impl PortError {
@@ -33,6 +34,39 @@ impl PortError {
         Self {
             code: code.into(),
             message: crate::domain::mask_sensitive_text(message.as_ref()),
+            retryable: false,
+        }
+    }
+
+    pub fn with_retryable(
+        code: impl Into<String>,
+        message: impl AsRef<str>,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: crate::domain::mask_sensitive_text(message.as_ref()),
+            retryable,
+        }
+    }
+
+    pub fn with_credential_values(
+        code: impl Into<String>,
+        message: impl AsRef<str>,
+        retryable: bool,
+        credential_values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let credential_values = credential_values
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        Self {
+            code: code.into(),
+            message: crate::domain::mask_sensitive_text_with_values(
+                message.as_ref(),
+                &credential_values,
+            ),
+            retryable,
         }
     }
 
@@ -42,6 +76,10 @@ impl PortError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.retryable
     }
 }
 
