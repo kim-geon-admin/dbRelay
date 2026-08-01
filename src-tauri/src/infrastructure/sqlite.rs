@@ -73,6 +73,7 @@ impl StoredRun {
                 .collect(),
             binding: None,
         }
+        .sanitize()
     }
 
     fn from_bound_state(state: &RunState, binding: &RunBinding) -> Self {
@@ -95,6 +96,12 @@ impl StoredRun {
     }
 
     fn sanitize(mut self) -> Self {
+        if let RunStatus::InDoubt { reason, .. } = &mut self.status {
+            **reason = RunError::connector(
+                reason.history_code(),
+                "sanitized persisted transaction error",
+            );
+        }
         for event in &mut self.events {
             match event {
                 StoredRunEvent::StepFailed { error_code, .. }
@@ -106,6 +113,23 @@ impl StoredRun {
             }
         }
         self
+    }
+
+    fn normalize_interrupted_recovery(mut self) -> Self {
+        self.status = match self.status {
+            RunStatus::RecoveryPending { failed_step, .. } => {
+                RunStatus::AwaitingRecovery { failed_step }
+            }
+            RunStatus::CommitPending { step } => RunStatus::InDoubt {
+                step,
+                reason: Box::new(RunError::connector(
+                    "COMMIT_OUTCOME_UNKNOWN",
+                    "commit outcome could not be confirmed",
+                )),
+            },
+            status => status,
+        };
+        self.sanitize()
     }
 }
 
@@ -512,7 +536,10 @@ impl SqliteStore {
             let current_binding = current_run.binding();
             let current_state = current_run.into_state();
             if current_state != *expected_state
-                || !matches!(current_state.status(), RunStatus::AwaitingRecovery { .. })
+                || !matches!(
+                    current_state.status(),
+                    RunStatus::AwaitingRecovery { .. } | RunStatus::RecoveryPending { .. }
+                )
                 || current_binding.as_ref() != Some(expected_binding)
             {
                 return Ok(BoundRecoveryApply::RecoveryNoLongerAvailable);
@@ -1066,7 +1093,8 @@ fn migrate_legacy_run_history(connection: &mut Connection) -> rusqlite::Result<(
                 events: Vec::new(),
                 binding: None,
             })
-            .sanitize();
+            .sanitize()
+            .normalize_interrupted_recovery();
         let sanitized_json =
             serde_json::to_string(&stored).map_err(|_| rusqlite::Error::InvalidQuery)?;
         transaction.execute(

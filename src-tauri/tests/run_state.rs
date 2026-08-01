@@ -56,6 +56,55 @@ fn editing_and_retrying_returns_the_run_to_the_failed_step() {
 }
 
 #[test]
+fn reserved_recovery_can_be_returned_to_awaiting_user_input() {
+    // Would fail if reserving a recovery action permanently moved the run into
+    // Running or a terminal state before external recovery work begins.
+    let mut state = RunState::awaiting_recovery_after_step(1, 3).unwrap();
+
+    state
+        .reserve_recovery(RecoveryAction::SkipAndContinue)
+        .unwrap();
+    assert!(matches!(
+        state.status(),
+        RunStatus::RecoveryPending {
+            failed_step: 1,
+            action: RecoveryAction::SkipAndContinue,
+        }
+    ));
+
+    state.return_reserved_recovery_to_awaiting().unwrap();
+
+    assert_eq!(
+        state.status(),
+        RunStatus::AwaitingRecovery { failed_step: 1 }
+    );
+}
+
+#[test]
+fn rollback_uncertainty_blocks_ordinary_recovery() {
+    // Would fail if a rollback error was reported as a successful rollback or
+    // an ordinary recoverable step failure.
+    let mut state = RunState::running(TransactionPolicy::AllOrNothing, 1);
+    state
+        .record_step_failure(0, RunError::connector("ORA-00001", "write failed"))
+        .unwrap();
+    state
+        .mark_in_doubt(
+            0,
+            RunError::connector("ORA-03113", "rollback connection lost"),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        state.status(),
+        RunStatus::InDoubt { step: 0, reason: _ }
+    ));
+    assert!(state
+        .apply_recovery(RecoveryAction::SkipAndContinue)
+        .is_err());
+}
+
+#[test]
 fn recovery_is_rejected_when_the_run_is_not_awaiting_user_input() {
     let mut state = RunState::running(TransactionPolicy::CommitSuccesses, 1);
 

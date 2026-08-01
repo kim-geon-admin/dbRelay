@@ -397,23 +397,44 @@ impl<
             }
         }
 
+        if let Some(last_step) = flow.query_steps.len().checked_sub(1) {
+            state.mark_commit_pending(last_step).map_err(|_| {
+                StartRunError::new(
+                    "RUN_STATE_INVALID",
+                    "run state could not record a commit checkpoint",
+                )
+            })?;
+            self.persist(&run_id, &state).await?;
+        }
+
         if let Err(error) = target.commit().await {
-            let _ = target.rollback().await;
-            let mut events = state.events().to_vec();
-            events.push(RunEvent::TransactionFailed {
-                error: run_error(error),
-            });
-            let rolled_back = RunState::from_history(
-                flow.transaction_policy,
-                RunStatus::RolledBack,
+            let step = flow.query_steps.len().saturating_sub(1);
+            state.mark_in_doubt(step, run_error(error)).map_err(|_| {
+                StartRunError::new(
+                    "RUN_STATE_INVALID",
+                    "run state could not record an indeterminate transaction",
+                )
+            })?;
+            if let Err(rollback_error) = target.rollback().await {
                 state
-                    .steps()
-                    .iter()
-                    .map(|step| step.status.clone())
-                    .collect(),
-                events,
-            );
-            return self.persist(&run_id, &rolled_back).await;
+                    .mark_in_doubt(step, run_error(rollback_error))
+                    .map_err(|_| {
+                        StartRunError::new(
+                            "RUN_STATE_INVALID",
+                            "run state could not record an indeterminate transaction",
+                        )
+                    })?;
+            }
+            return self.persist(&run_id, &state).await;
+        }
+
+        if !flow.query_steps.is_empty() {
+            state.confirm_pending_commit().map_err(|_| {
+                StartRunError::new(
+                    "RUN_STATE_INVALID",
+                    "run state could not confirm the commit",
+                )
+            })?;
         }
 
         self.persist(&run_id, &state).await
@@ -439,7 +460,7 @@ impl<
                 ))
             }
         };
-        let mut binding = self
+        let binding = self
             .history
             .load_run_binding(run_id)
             .await
@@ -482,15 +503,28 @@ impl<
             }
             RecoveryRequest::SkipAndContinue { .. } => {
                 state
-                    .apply_recovery(RecoveryAction::SkipAndContinue)
+                    .reserve_recovery(RecoveryAction::SkipAndContinue)
                     .map_err(recovery_state_error)?;
                 self.apply_bound_recovery(run_id, &state, &paused_state, &binding, &binding, None)
                     .await?;
-                if matches!(state.status(), RunStatus::Completed) {
-                    return Ok(RunSnapshot::from_state(run_id.into(), &state));
-                }
-                let next_step = match state.status() {
-                    RunStatus::Running { step } => step,
+                let reserved_state = state.clone();
+                state
+                    .apply_reserved_recovery()
+                    .map_err(recovery_state_error)?;
+                match state.status() {
+                    RunStatus::Completed => {
+                        self.apply_bound_recovery(
+                            run_id,
+                            &state,
+                            &reserved_state,
+                            &binding,
+                            &binding,
+                            None,
+                        )
+                        .await?;
+                        return Ok(RunSnapshot::from_state(run_id.into(), &state));
+                    }
+                    RunStatus::Running { .. } => {}
                     _ => {
                         return Err(RecoveryError::new(
                             "RUN_STATE_INVALID",
@@ -500,9 +534,9 @@ impl<
                 };
                 let (mut source, mut target) = match self.open_bound_sessions(&binding).await {
                     Ok(sessions) => sessions,
-                    Err(error) => {
+                    Err(_) => {
                         return self
-                            .persist_recovery_failure(run_id, state, next_step, error, &binding)
+                            .return_reserved_recovery(run_id, &reserved_state, &binding)
                             .await
                     }
                 };
@@ -531,43 +565,59 @@ impl<
                 flow.version = binding.flow.version.checked_add(1).ok_or_else(|| {
                     RecoveryError::new("FLOW_VERSION_INVALID", "flow version cannot be advanced")
                 })?;
-                binding.flow = flow;
                 state
-                    .apply_recovery(RecoveryAction::EditAndRetry)
+                    .reserve_recovery(RecoveryAction::EditAndRetry)
                     .map_err(recovery_state_error)?;
                 self.apply_bound_recovery(
                     run_id,
                     &state,
                     &paused_state,
                     &paused_binding,
-                    &binding,
-                    Some(&binding.flow),
+                    &paused_binding,
+                    None,
                 )
                 .await?;
-                let (mut source, mut target) = match self.open_bound_sessions(&binding).await {
-                    Ok(sessions) => sessions,
-                    Err(error) => {
-                        return self
-                            .persist_recovery_failure(run_id, state, failed_step, error, &binding)
-                            .await
-                    }
-                };
-                if let Err(error) = self
+                let reserved_state = state.clone();
+                let mut candidate_binding = binding.clone();
+                candidate_binding.flow = flow;
+                let (mut source, mut target) =
+                    match self.open_bound_sessions(&candidate_binding).await {
+                        Ok(sessions) => sessions,
+                        Err(_) => {
+                            return self
+                                .return_reserved_recovery(run_id, &reserved_state, &paused_binding)
+                                .await
+                        }
+                    };
+                if self
                     .preflight_step(
                         &mut source,
-                        binding.target_profile.kind,
-                        &binding.flow.query_steps[failed_step],
+                        candidate_binding.target_profile.kind,
+                        &candidate_binding.flow.query_steps[failed_step],
                     )
                     .await
+                    .is_err()
                 {
                     return self
-                        .persist_recovery_failure(run_id, state, failed_step, error, &binding)
+                        .return_reserved_recovery(run_id, &reserved_state, &paused_binding)
                         .await;
                 }
+                self.apply_bound_recovery(
+                    run_id,
+                    &state,
+                    &reserved_state,
+                    &paused_binding,
+                    &candidate_binding,
+                    Some(&candidate_binding.flow),
+                )
+                .await?;
+                state
+                    .apply_reserved_recovery()
+                    .map_err(recovery_state_error)?;
                 self.execute_committed_steps(
                     run_id,
-                    &binding.flow,
-                    &binding,
+                    &candidate_binding.flow,
+                    &candidate_binding,
                     state,
                     &mut source,
                     &mut target,
@@ -643,6 +693,13 @@ impl<
                         .await
                 }
             };
+            state.mark_commit_pending(step_index).map_err(|_| {
+                StartRunError::new(
+                    "RUN_STATE_INVALID",
+                    "run state could not record a commit checkpoint",
+                )
+            })?;
+            self.persist_bound(run_id, &state, binding).await?;
             if let Err(error) = target.commit().await {
                 return self
                     .rollback_committed_failure(
@@ -677,13 +734,31 @@ impl<
         error: RunError,
         binding: &RunBinding,
     ) -> Result<RunSnapshot, StartRunError> {
-        state.record_step_failure(step_index, error).map_err(|_| {
-            StartRunError::new(
-                "RUN_STATE_INVALID",
-                "run state could not record a failed step",
-            )
-        })?;
-        let _ = target.rollback().await;
+        if matches!(state.status(), RunStatus::CommitPending { .. }) {
+            state.mark_in_doubt(step_index, error).map_err(|_| {
+                StartRunError::new(
+                    "RUN_STATE_INVALID",
+                    "run state could not record an indeterminate transaction",
+                )
+            })?;
+        } else {
+            state.record_step_failure(step_index, error).map_err(|_| {
+                StartRunError::new(
+                    "RUN_STATE_INVALID",
+                    "run state could not record a failed step",
+                )
+            })?;
+        }
+        if let Err(rollback_error) = target.rollback().await {
+            state
+                .mark_in_doubt(step_index, run_error(rollback_error))
+                .map_err(|_| {
+                    StartRunError::new(
+                        "RUN_STATE_INVALID",
+                        "run state could not record an indeterminate transaction",
+                    )
+                })?;
+        }
         self.persist_bound(run_id, &state, binding).await
     }
 
@@ -781,19 +856,6 @@ impl<
         Ok((source, target))
     }
 
-    async fn persist_recovery(
-        &self,
-        run_id: &str,
-        state: &RunState,
-        binding: &RunBinding,
-    ) -> Result<RunSnapshot, RecoveryError> {
-        self.history
-            .append_bound_run(run_id, state, binding)
-            .await
-            .map_err(RecoveryError::from_port)?;
-        Ok(RunSnapshot::from_state(run_id.into(), state))
-    }
-
     async fn apply_bound_recovery(
         &self,
         run_id: &str,
@@ -828,18 +890,19 @@ impl<
         }
     }
 
-    async fn persist_recovery_failure(
+    async fn return_reserved_recovery(
         &self,
         run_id: &str,
-        mut state: RunState,
-        failed_step: usize,
-        error: RunError,
+        expected_state: &RunState,
         binding: &RunBinding,
     ) -> Result<RunSnapshot, RecoveryError> {
+        let mut state = expected_state.clone();
         state
-            .record_step_failure(failed_step, error)
+            .return_reserved_recovery_to_awaiting()
             .map_err(recovery_state_error)?;
-        self.persist_recovery(run_id, &state, binding).await
+        self.apply_bound_recovery(run_id, &state, expected_state, binding, binding, None)
+            .await?;
+        Ok(RunSnapshot::from_state(run_id.into(), &state))
     }
 
     async fn rollback_after_failure(
@@ -856,7 +919,16 @@ impl<
                 "run state could not record a failed step",
             )
         })?;
-        let _ = target.rollback().await;
+        if let Err(rollback_error) = target.rollback().await {
+            state
+                .mark_in_doubt(step_index, run_error(rollback_error))
+                .map_err(|_| {
+                    StartRunError::new(
+                        "RUN_STATE_INVALID",
+                        "run state could not record an indeterminate transaction",
+                    )
+                })?;
+        }
         self.persist(run_id, &state).await
     }
 

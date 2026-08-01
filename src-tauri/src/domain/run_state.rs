@@ -7,8 +7,23 @@ use super::{error_masking::mask_sensitive_text_with_values, TransactionPolicy};
 pub enum RunStatus {
     Draft,
     Validating,
-    Running { step: usize },
-    AwaitingRecovery { failed_step: usize },
+    Running {
+        step: usize,
+    },
+    AwaitingRecovery {
+        failed_step: usize,
+    },
+    RecoveryPending {
+        failed_step: usize,
+        action: RecoveryAction,
+    },
+    CommitPending {
+        step: usize,
+    },
+    InDoubt {
+        step: usize,
+        reason: Box<RunError>,
+    },
     Completed,
     RolledBack,
     StoppedByUser,
@@ -302,6 +317,61 @@ impl RunState {
         };
         self.validate_step(failed_step)?;
 
+        self.apply_recovery_at_step(failed_step, action)
+    }
+
+    pub fn reserve_recovery(&mut self, action: RecoveryAction) -> Result<(), RunError> {
+        let RunStatus::AwaitingRecovery { failed_step } = self.status else {
+            return Err(RunError::InvalidTransition {
+                status: self.status.clone(),
+                action,
+            });
+        };
+        self.validate_step(failed_step)?;
+        self.status = RunStatus::RecoveryPending {
+            failed_step,
+            action,
+        };
+        Ok(())
+    }
+
+    pub fn return_reserved_recovery_to_awaiting(&mut self) -> Result<(), RunError> {
+        let RunStatus::RecoveryPending {
+            failed_step,
+            action,
+        } = self.status
+        else {
+            return Err(RunError::InvalidTransition {
+                status: self.status.clone(),
+                action: RecoveryAction::EditAndRetry,
+            });
+        };
+        self.validate_step(failed_step)?;
+        let _ = action;
+        self.status = RunStatus::AwaitingRecovery { failed_step };
+        Ok(())
+    }
+
+    pub fn apply_reserved_recovery(&mut self) -> Result<(), RunError> {
+        let RunStatus::RecoveryPending {
+            failed_step,
+            action,
+        } = self.status
+        else {
+            return Err(RunError::InvalidTransition {
+                status: self.status.clone(),
+                action: RecoveryAction::EditAndRetry,
+            });
+        };
+        self.validate_step(failed_step)?;
+        self.apply_recovery_at_step(failed_step, action)
+    }
+
+    fn apply_recovery_at_step(
+        &mut self,
+        failed_step: usize,
+        action: RecoveryAction,
+    ) -> Result<(), RunError> {
         self.events.push(RunEvent::RecoveryApplied {
             step: failed_step,
             action,
@@ -327,12 +397,55 @@ impl RunState {
         Ok(())
     }
 
-    pub fn advance_after_success(&mut self) -> Result<(), RunError> {
-        let RunStatus::Running { step } = self.status else {
+    pub fn mark_commit_pending(&mut self, step: usize) -> Result<(), RunError> {
+        self.validate_step(step)?;
+        match self.status {
+            RunStatus::Running { step: expected } if expected == step => {}
+            RunStatus::Completed if step + 1 == self.steps.len() => {}
+            _ => {
+                return Err(RunError::InvalidTransition {
+                    status: self.status.clone(),
+                    action: RecoveryAction::EditAndRetry,
+                })
+            }
+        }
+        self.status = RunStatus::CommitPending { step };
+        Ok(())
+    }
+
+    pub fn confirm_pending_commit(&mut self) -> Result<(), RunError> {
+        let RunStatus::CommitPending { step } = self.status else {
             return Err(RunError::InvalidTransition {
                 status: self.status.clone(),
                 action: RecoveryAction::EditAndRetry,
             });
+        };
+        self.validate_step(step)?;
+        self.status = RunStatus::Completed;
+        Ok(())
+    }
+
+    pub fn mark_in_doubt(&mut self, step: usize, reason: RunError) -> Result<(), RunError> {
+        self.validate_step(step)?;
+        self.events.push(RunEvent::TransactionFailed {
+            error: reason.clone(),
+        });
+        self.status = RunStatus::InDoubt {
+            step,
+            reason: Box::new(reason),
+        };
+        Ok(())
+    }
+
+    pub fn advance_after_success(&mut self) -> Result<(), RunError> {
+        let step = match self.status {
+            RunStatus::Running { step } | RunStatus::CommitPending { step } => step,
+            _ => {
+                return Err(RunError::InvalidTransition {
+                    status: self.status.clone(),
+                    action: RecoveryAction::EditAndRetry,
+                })
+            }
         };
 
         self.validate_step(step)?;
@@ -347,11 +460,17 @@ impl RunState {
 
     fn require_running_step(&self, step: usize) -> Result<(), RunError> {
         match self.status {
-            RunStatus::Running { step: expected } if expected == step => self.validate_step(step),
-            RunStatus::Running { step: expected } => Err(RunError::InvalidStep {
-                expected,
-                received: step,
-            }),
+            RunStatus::Running { step: expected } | RunStatus::CommitPending { step: expected }
+                if expected == step =>
+            {
+                self.validate_step(step)
+            }
+            RunStatus::Running { step: expected } | RunStatus::CommitPending { step: expected } => {
+                Err(RunError::InvalidStep {
+                    expected,
+                    received: step,
+                })
+            }
             _ => Err(RunError::InvalidTransition {
                 status: self.status.clone(),
                 action: RecoveryAction::EditAndRetry,

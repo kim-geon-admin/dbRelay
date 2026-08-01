@@ -8,11 +8,11 @@ use async_trait::async_trait;
 use db_relay::{
     application::{
         flow_service::FlowService,
-        ports::{CredentialStore, FlowRepository, PortError, ResolvedSecret},
+        ports::{CredentialStore, FlowRepository, PortError, ResolvedSecret, RunBinding},
         settings_service::SettingsService,
     },
     domain::{
-        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunState,
+        ConnectionProfile, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunState, RunStatus,
         TransactionPolicy,
     },
     infrastructure::sqlite::SqliteStore,
@@ -394,6 +394,50 @@ fn recovery_events_persist_with_the_run_history() {
     store.append_run("run-42", &state).unwrap();
 
     assert_eq!(store.load_run("run-42").unwrap(), Some(state));
+}
+
+#[test]
+fn reopening_releases_an_interrupted_recovery_reservation() {
+    // Would fail if a crash after reserving Skip/Edit left a saved run in a
+    // state that ordinary recovery cannot reopen.
+    let path = std::env::temp_dir().join(format!(
+        "db-relay-pending-recovery-{}-{}.sqlite",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    let source = profile("source", "credential://db-relay/source");
+    let target = profile("target", "credential://db-relay/target");
+    let flow = flow_referencing("source", "target");
+    store.save_connection(&source).unwrap();
+    store.save_connection(&target).unwrap();
+    store.save_flow(&flow).unwrap();
+    let binding = RunBinding {
+        flow,
+        source_profile: source,
+        target_profile: target,
+    };
+    let mut state = RunState::awaiting_recovery_after_step(1, 2).unwrap();
+    state
+        .reserve_recovery(RecoveryAction::SkipAndContinue)
+        .unwrap();
+    store
+        .append_bound_run("reserved-run", &state, &binding)
+        .unwrap();
+    drop(store);
+
+    let reopened = SqliteStore::open(&path).unwrap();
+    let loaded = reopened.load_run("reserved-run").unwrap().unwrap();
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(
+        loaded.status(),
+        RunStatus::AwaitingRecovery { failed_step: 1 }
+    );
 }
 
 #[test]

@@ -145,6 +145,36 @@ async fn all_or_nothing_rolls_back_target_when_the_second_step_fails() {
 }
 
 #[tokio::test]
+async fn rollback_failure_is_persisted_as_an_indeterminate_run() {
+    // Would fail if the runner discarded a rollback error and claimed the
+    // target transaction had been rolled back.
+    let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
+        .source_rows_for_step(0, rows_for_customer())
+        .source_rows_for_step(1, rows_for_address())
+        .target_fails_on_step(1)
+        .target_fails_on_rollback(PortError::new("ORA-03113", "rollback connection lost"));
+
+    let result = harness.runner.start(&harness.flow_id).await.unwrap();
+    let persisted = harness.history.load_run(&result.run_id).unwrap().unwrap();
+
+    assert!(matches!(result.status, RunStatus::InDoubt { step: 1, .. }));
+    assert!(matches!(
+        persisted.status(),
+        RunStatus::InDoubt { step: 1, .. }
+    ));
+    assert!(harness
+        .runner
+        .recover(
+            &result.run_id,
+            RecoveryRequest::SkipAndContinue {
+                step_id: "address".into(),
+            },
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn missing_bind_column_blocks_execution_before_target_begin() {
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
         .source_rows_for_step(0, RowSet::single([("UNRELATED", Value::Int(1))]))
@@ -248,6 +278,15 @@ async fn skip_records_the_decision_then_completes_the_remaining_steps() {
 
     assert_eq!(run.steps[1], StepStatus::SkippedByUser);
     assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(
+        harness
+            .history
+            .load_run(&paused.run_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        RunStatus::Completed
+    );
 }
 
 #[tokio::test]
@@ -280,6 +319,35 @@ async fn edit_and_retry_versions_the_flow_and_executes_the_failed_step() {
     assert_eq!(
         flow.query_steps[1].select_sql,
         "select address_id from revised_address"
+    );
+}
+
+#[tokio::test]
+async fn invalid_recovery_edit_does_not_overwrite_the_saved_flow() {
+    // Would fail if the recovery transition saves the candidate flow before it
+    // has passed source/bind preflight.
+    let harness =
+        RunnerHarness::with_policy(TransactionPolicy::CommitSuccesses).target_fails_on_step(1);
+    let paused = harness.runner.start(&harness.flow_id).await.unwrap();
+    let saved_flow = harness.history.load_flow(&harness.flow_id).unwrap();
+
+    let run = harness
+        .runner
+        .recover(
+            &paused.run_id,
+            RecoveryRequest::EditAndRetry {
+                step_id: "address".into(),
+                select_sql: "delete from address".into(),
+                upsert_sql: "merge revised_address using dual on (address_id = :ADDRESS_ID)".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.status, RunStatus::AwaitingRecovery { failed_step: 1 });
+    assert_eq!(
+        harness.history.load_flow(&harness.flow_id).unwrap(),
+        saved_flow
     );
 }
 
@@ -578,7 +646,7 @@ async fn retryable_connector_errors_survive_runner_and_history_round_trip() {
 }
 
 #[tokio::test]
-async fn commit_failure_rolls_back_once_and_persists_the_sanitized_native_error() {
+async fn commit_failure_is_persisted_as_an_indeterminate_outcome() {
     let secret = "commit-secret-fixture";
     let harness = RunnerHarness::with_policy(TransactionPolicy::AllOrNothing)
         .source_rows_for_step(0, rows_for_customer())
@@ -588,7 +656,7 @@ async fn commit_failure_rolls_back_once_and_persists_the_sanitized_native_error(
     let result = harness.runner.start(&harness.flow_id).await.unwrap();
     let state = harness.history.load_run(&result.run_id).unwrap().unwrap();
 
-    assert_eq!(result.status, RunStatus::RolledBack);
+    assert!(matches!(result.status, RunStatus::InDoubt { step: 1, .. }));
     assert_eq!(
         harness.target_operations(),
         ["begin", "execute:0", "execute:1", "commit", "rollback"]
@@ -722,6 +790,11 @@ impl RunnerHarness {
 
     fn target_fails_on_commit(self, error: PortError) -> Self {
         self.connector.fail_target_commit(error);
+        self
+    }
+
+    fn target_fails_on_rollback(self, error: PortError) -> Self {
+        self.connector.fail_target_rollback(error);
         self
     }
 
@@ -906,6 +979,7 @@ struct RunnerConnectorState {
     target_execute_count: Mutex<usize>,
     target_failures: Mutex<BTreeMap<usize, PortError>>,
     target_commit_failure: Mutex<Option<PortError>>,
+    target_rollback_failure: Mutex<Option<PortError>>,
     committed_step_labels: Mutex<bool>,
 }
 
@@ -944,6 +1018,10 @@ impl RunnerConnectorFactory {
 
     fn fail_target_commit(&self, error: PortError) {
         *self.state.target_commit_failure.lock().unwrap() = Some(error);
+    }
+
+    fn fail_target_rollback(&self, error: PortError) {
+        *self.state.target_rollback_failure.lock().unwrap() = Some(error);
     }
 
     fn target_operations(&self) -> Vec<String> {
@@ -1111,6 +1189,11 @@ impl DatabaseSession for RunnerTargetSession {
             "rollback".into()
         };
         self.state.target_operations.lock().unwrap().push(operation);
-        Ok(())
+        self.state
+            .target_rollback_failure
+            .lock()
+            .unwrap()
+            .clone()
+            .map_or(Ok(()), Err)
     }
 }
