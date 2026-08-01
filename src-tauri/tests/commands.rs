@@ -16,7 +16,7 @@ fn profile_with_secret_reference() -> ConnectionProfile {
         kind: DbKind::Oracle,
         host: "db.example.test".into(),
         port: 1521,
-        service_name: "ORCLPDB1".into(),
+        sid: "ORCLPDB1".into(),
         username: "relay".into(),
         credential_ref: "keyring://production-password".into(),
         credential_storage: CredentialStorage::Keyring,
@@ -68,6 +68,17 @@ fn connection_response_never_serializes_credential_material() {
     assert!(!json.contains("token"));
     assert!(!json.contains("credential_ref"));
     assert!(!json.contains("keyring://production-password"));
+}
+
+#[test]
+fn connection_response_serializes_sid_not_service_name() {
+    let mut profile = profile_with_secret_reference();
+    profile.sid = "XE".into();
+    let response = ConnectionResponse::from(profile);
+    let json = serde_json::to_value(response).unwrap();
+
+    assert_eq!(json["sid"], "XE");
+    assert!(json.get("serviceName").is_none());
 }
 
 #[test]

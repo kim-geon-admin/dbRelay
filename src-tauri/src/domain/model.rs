@@ -28,7 +28,8 @@ pub struct ConnectionProfile {
     pub kind: DbKind,
     pub host: String,
     pub port: u16,
-    pub service_name: String,
+    #[serde(alias = "service_name")]
+    pub sid: String,
     pub username: String,
     pub credential_ref: String,
     #[serde(default = "default_credential_storage")]

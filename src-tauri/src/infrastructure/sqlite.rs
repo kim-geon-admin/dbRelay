@@ -383,7 +383,7 @@ impl SqliteStore {
                     db_kind(profile.kind),
                     profile.host,
                     profile.port,
-                    profile.service_name,
+                    profile.sid,
                     profile.username,
                     profile.credential_ref,
                     credential_storage(profile.credential_storage),
@@ -1263,7 +1263,7 @@ fn connection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionPr
         kind: parse_db_kind(&row.get::<_, String>(2)?)?,
         host: row.get(3)?,
         port: row.get(4)?,
-        service_name: row.get(5)?,
+        sid: row.get(5)?,
         username: row.get(6)?,
         credential_ref: row.get(7)?,
         credential_storage: parse_credential_storage(&row.get::<_, String>(8)?)?,
@@ -1332,7 +1332,7 @@ fn connection_signature(profile: &ConnectionProfile) -> String {
         profile.kind,
         profile.host,
         profile.port,
-        profile.service_name,
+        profile.sid,
         profile.username,
         profile.enabled
     );

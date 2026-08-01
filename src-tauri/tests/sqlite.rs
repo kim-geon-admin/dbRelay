@@ -249,7 +249,7 @@ fn profile(id: &str, credential_ref: &str) -> ConnectionProfile {
         kind: DbKind::Oracle,
         host: "db.internal".into(),
         port: 1521,
-        service_name: "XE".into(),
+        sid: "XE".into(),
         username: "relay".into(),
         credential_ref: credential_ref.into(),
         credential_storage: CredentialStorage::Keyring,
@@ -257,6 +257,56 @@ fn profile(id: &str, credential_ref: &str) -> ConnectionProfile {
         enabled: true,
         source_read_only: true,
     }
+}
+
+#[test]
+fn legacy_profile_json_with_service_name_deserializes_as_sid() {
+    let profile: ConnectionProfile = serde_json::from_str(
+        r#"{"id":"legacy","display_name":"Legacy","kind":"oracle","host":"db.example","port":1521,"service_name":"XE","username":"relay","credential_ref":"ref","enabled":true}"#,
+    )
+    .unwrap();
+
+    assert_eq!(profile.sid, "XE");
+}
+
+#[test]
+fn legacy_sqlite_service_name_column_loads_as_sid() {
+    let path = std::env::temp_dir().join(format!(
+        "db-relay-legacy-sid-{}-{}.sqlite",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            r#"
+            CREATE TABLE connection_profiles (
+                id TEXT PRIMARY KEY NOT NULL,
+                display_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                service_name TEXT NOT NULL,
+                username TEXT NOT NULL,
+                credential_ref TEXT NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            INSERT INTO connection_profiles VALUES
+                ('legacy', 'Legacy', 'oracle', 'db.example', 1521, 'XE', 'relay', 'ref', 1);
+            "#,
+        )
+        .unwrap();
+    drop(legacy);
+
+    let store = SqliteStore::open(&path).unwrap();
+    let loaded = store.load_connection("legacy").unwrap();
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(loaded.sid, "XE");
 }
 
 fn flow_referencing(source_connection_id: &str, target_connection_id: &str) -> Flow {

@@ -106,7 +106,7 @@ impl OracleConnector {
             .open(DriverConnectionInfo {
                 host: &profile.host,
                 port: profile.port,
-                service_name: &profile.service_name,
+                service_name: &profile.sid,
                 username: &profile.username,
                 password,
             })
