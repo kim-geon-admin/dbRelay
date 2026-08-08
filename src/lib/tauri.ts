@@ -1,5 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
-
 export type CommandError = { title: string; detail: string; code: string; runId?: string; stepId?: string };
 
 type ConnectionDto = {
@@ -70,5 +68,5 @@ export function invokeCommand<TCommand extends keyof CommandRequestMap>(
   command: TCommand,
   ...[request]: CommandRequestMap[TCommand] extends undefined ? [] : [CommandRequestMap[TCommand]]
 ): Promise<CommandResponseMap[TCommand]> {
-  return invoke<CommandResponseMap[TCommand]>(command, request);
+  return window.dbRelay.invoke(command, request) as Promise<CommandResponseMap[TCommand]>;
 }
