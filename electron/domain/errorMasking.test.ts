@@ -12,6 +12,11 @@ describe("sensitive error masking", () => {
     );
   });
 
+  it("masks an entire quoted password containing doubled quote escapes", () => {
+    expect(maskSensitiveText("Password='top''secret';Host=db"))
+      .toBe("Password=[REDACTED];Host=db");
+  });
+
   it("masks supplied credential values without case sensitivity", () => {
     const masked = maskSensitiveText(
       "connection failed for SCOTT with top-secret and ABC123",

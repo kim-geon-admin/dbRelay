@@ -81,8 +81,19 @@ function isSensitiveKeyBoundary(lower: string, start: number): boolean {
 function endOfSensitiveValue(text: string, start: number): number {
   const first = text[start];
   if (first === "'" || first === '"') {
-    const closing = text.indexOf(first, start + 1);
-    return closing < 0 ? text.length : closing + 1;
+    let index = start + 1;
+    while (index < text.length) {
+      if (text[index] === first) {
+        if (text[index + 1] === first) {
+          index += 2;
+        } else {
+          return index + 1;
+        }
+      } else {
+        index += 1;
+      }
+    }
+    return text.length;
   }
 
   for (let index = start; index < text.length; index += 1) {

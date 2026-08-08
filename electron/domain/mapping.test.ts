@@ -44,4 +44,16 @@ describe("Oracle named-bind mapping", () => {
     expect(() => extractNamedBinds("update t set value = :1"))
       .toThrow("numeric bind placeholder is not supported: 1");
   });
+
+  it("maps a __proto__ bind as an own key without changing the result prototype", () => {
+    const row = Object.create(null) as NamedRow;
+    row.__proto__ = 7;
+    const binds = extractNamedBinds("UPDATE customer SET value = :__proto__");
+
+    const mapped = mapRow(row, binds);
+
+    expect(Object.prototype.hasOwnProperty.call(mapped, "__proto__")).toBe(true);
+    expect(mapped.__proto__).toBe(7);
+    expect(Object.getPrototypeOf(mapped)).toBeNull();
+  });
 });

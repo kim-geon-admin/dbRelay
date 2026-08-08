@@ -102,7 +102,7 @@ export function mapRow(row: SourceRow, bindNames: readonly string[]): NamedRow {
     normalized.set(normalizedColumn, value);
   }
 
-  const mapped: NamedRow = {};
+  const mapped = Object.create(null) as NamedRow;
   for (const bind of bindNames) {
     const normalizedBind = asciiUpper(bind);
     if (!normalized.has(normalizedBind)) {

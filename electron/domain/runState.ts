@@ -12,9 +12,12 @@ import type {
 } from "./models";
 
 export class RunError extends Error {
-  private constructor(private readonly value: RunErrorData) {
+  private readonly value: RunErrorData;
+
+  private constructor(value: RunErrorData) {
     super(value.type);
     this.name = "RunError";
+    this.value = freezeSnapshot(value);
   }
 
   get type(): RunErrorData["type"] {
@@ -22,7 +25,7 @@ export class RunError extends Error {
   }
 
   get detail(): RunErrorData["detail"] {
-    return this.value.detail;
+    return freezeSnapshot(this.value.detail);
   }
 
   static connector(code: string, message: string): RunError {
@@ -127,17 +130,27 @@ export class RunError extends Error {
   }
 
   toJSON(): RunErrorData {
-    return this.value;
+    return freezeSnapshot(this.value);
   }
 }
 
 export class RunState {
+  private readonly transactionPolicy: TransactionPolicy;
+  private runStatus: RunStatus;
+  private readonly runSteps: RunStep[];
+  private readonly runEvents: RunEvent[];
+
   private constructor(
-    private readonly transactionPolicy: TransactionPolicy,
-    private runStatus: RunStatus,
-    private readonly runSteps: RunStep[],
-    private readonly runEvents: RunEvent[],
-  ) {}
+    transactionPolicy: TransactionPolicy,
+    runStatus: RunStatus,
+    runSteps: RunStep[],
+    runEvents: RunEvent[],
+  ) {
+    this.transactionPolicy = transactionPolicy;
+    this.runStatus = runStatus;
+    this.runSteps = runSteps;
+    this.runEvents = runEvents.map((event) => freezeSnapshot(event));
+  }
 
   static running(policy: TransactionPolicy, stepCount: number): RunState {
     requireNonNegativeInteger(stepCount, "step count");
@@ -185,7 +198,7 @@ export class RunState {
   }
 
   status(): RunStatus {
-    return cloneRunStatus(this.runStatus);
+    return freezeSnapshot(cloneRunStatus(this.runStatus));
   }
 
   policy(): TransactionPolicy {
@@ -193,11 +206,11 @@ export class RunState {
   }
 
   steps(): readonly RunStep[] {
-    return this.runSteps;
+    return freezeSnapshot(this.runSteps);
   }
 
   events(): readonly RunEvent[] {
-    return this.runEvents;
+    return freezeSnapshot(this.runEvents);
   }
 
   recordStepSuccess(step: number, affectedRows: number): void {
@@ -205,14 +218,14 @@ export class RunState {
     this.requireRunningStep(step);
     this.validateStep(step);
     this.runSteps[step].status = { succeeded: { affected_rows: affectedRows } };
-    this.runEvents.push({ type: "step_succeeded", step, affected_rows: affectedRows });
+    this.recordEvent({ type: "step_succeeded", step, affected_rows: affectedRows });
     this.advanceAfterSuccess();
   }
 
   recordStepFailure(step: number, error: RunError): void {
     this.requireRunningStep(step);
     this.runSteps[step].status = "failed";
-    this.runEvents.push({ type: "step_failed", step, error: error.toJSON() });
+    this.recordEvent({ type: "step_failed", step, error: error.toJSON() });
     this.runStatus = this.transactionPolicy === "commit_successes"
       ? { awaiting_recovery: { failed_step: step } }
       : "rolled_back";
@@ -276,7 +289,7 @@ export class RunState {
 
   markInDoubt(step: number, reason: RunError): void {
     this.validateStep(step);
-    this.runEvents.push({ type: "transaction_failed", error: reason.toJSON() });
+    this.recordEvent({ type: "transaction_failed", error: reason.toJSON() });
     this.runStatus = { in_doubt: { step, reason: reason.toJSON() } };
   }
 
@@ -292,16 +305,16 @@ export class RunState {
   }
 
   toJSON(): RunStateData {
-    return {
+    return freezeSnapshot({
       policy: this.transactionPolicy,
       status: this.runStatus,
       steps: this.runSteps,
       events: this.runEvents,
-    };
+    });
   }
 
   private applyRecoveryAtStep(failedStep: number, action: RecoveryAction): void {
-    this.runEvents.push({ type: "recovery_applied", step: failedStep, action });
+    this.recordEvent({ type: "recovery_applied", step: failedStep, action });
     switch (action) {
       case "edit_and_retry":
         this.runStatus = { running: { step: failedStep } };
@@ -334,6 +347,10 @@ export class RunState {
     if (!Number.isInteger(step) || step < 0 || step >= this.runSteps.length) {
       throw RunError.stepOutOfBounds(step, this.runSteps.length);
     }
+  }
+
+  private recordEvent(event: RunEvent): void {
+    this.runEvents.push(freezeSnapshot(event));
   }
 }
 
@@ -502,10 +519,32 @@ function asBoolean(input: unknown, name: string): boolean {
 }
 
 function asNonNegativeInteger(input: unknown, name: string): number {
-  if (typeof input !== "number" || !Number.isInteger(input) || input < 0) {
+  if (typeof input !== "number" || !Number.isSafeInteger(input) || input < 0) {
     throw new TypeError(`${name} must be a non-negative integer`);
   }
   return input;
+}
+
+function freezeSnapshot<T>(value: T): T {
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => freezeSnapshot(item))) as T;
+  }
+
+  const snapshot = Object.create(
+    Object.getPrototypeOf(value) === null ? null : Object.prototype,
+  ) as Record<string, unknown>;
+  for (const [key, item] of Object.entries(value)) {
+    Object.defineProperty(snapshot, key, {
+      value: freezeSnapshot(item),
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(snapshot) as T;
 }
 
 function requireNonNegativeInteger(input: number, name: string): void {

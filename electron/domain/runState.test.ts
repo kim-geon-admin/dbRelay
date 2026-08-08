@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RunError, RunState } from "./runState";
+import type { ConnectorErrorData, RunEvent, RunStep } from "./runState";
 
 describe("RunState", () => {
   it("committed run pauses for user recovery after a step failure", () => {
@@ -100,6 +101,15 @@ describe("RunState", () => {
     expect(state.steps()[0].status).toBe("not_run");
   });
 
+  it("rejects affected-row counts outside JavaScript's safe integer range", () => {
+    const state = RunState.running("commit_successes", 1);
+
+    expect(() => state.recordStepSuccess(0, Number.MAX_SAFE_INTEGER + 1))
+      .toThrow("affected rows must be a non-negative integer");
+    expect(state.status()).toEqual({ running: { step: 0 } });
+    expect(state.steps()[0].status).toBe("not_run");
+  });
+
   it("records and confirms the all-or-nothing commit checkpoint", () => {
     const state = RunState.running("all_or_nothing", 2);
     state.recordStepSuccess(0, 1);
@@ -154,6 +164,64 @@ describe("RunState", () => {
     const persisted = JSON.stringify(state.events());
     expect(persisted).not.toContain("raw-secret");
     expect(persisted).toContain("[REDACTED]");
+  });
+
+  it("returns frozen error snapshots that cannot inject raw secrets", () => {
+    const error = RunError.connector("ORA-01017", "password=masked-secret");
+    const detail = error.detail as ConnectorErrorData;
+    const serialized = error.toJSON();
+
+    expect(Object.isFrozen(detail)).toBe(true);
+    expect(Object.isFrozen(serialized)).toBe(true);
+    expect(Object.isFrozen(serialized.detail)).toBe(true);
+    expect(error.detail).not.toBe(detail);
+    expect(error.toJSON()).not.toBe(serialized);
+
+    attemptMutation(() => {
+      detail.message = "password=raw-detail-secret";
+    });
+    attemptMutation(() => {
+      (serialized.detail as ConnectorErrorData).message = "password=raw-json-secret";
+    });
+
+    expect(error.connectorMessage()).toBe("password=[REDACTED]");
+    expect(JSON.stringify(error)).not.toMatch(/raw-detail-secret|raw-json-secret/);
+  });
+
+  it("returns frozen state snapshots that cannot change steps or recorded errors", () => {
+    const state = RunState.running("commit_successes", 1);
+    state.recordStepFailure(
+      0,
+      RunError.connector("ORA-01017", "password=masked-secret"),
+    );
+    const steps = state.steps() as RunStep[];
+    const events = state.events() as RunEvent[];
+    const serialized = state.toJSON();
+    const failedEvent = events.find((event) => event.type === "step_failed");
+
+    expect(failedEvent?.type).toBe("step_failed");
+    expect(Object.isFrozen(steps)).toBe(true);
+    expect(Object.isFrozen(steps[0])).toBe(true);
+    expect(Object.isFrozen(events)).toBe(true);
+    expect(Object.isFrozen(failedEvent)).toBe(true);
+    expect(Object.isFrozen(serialized)).toBe(true);
+    expect(Object.isFrozen(serialized.steps)).toBe(true);
+    expect(Object.isFrozen(serialized.events)).toBe(true);
+
+    attemptMutation(() => {
+      steps[0].status = "not_run";
+    });
+    attemptMutation(() => {
+      if (failedEvent?.type === "step_failed" && failedEvent.error.type === "connector") {
+        failedEvent.error.detail.message = "password=raw-event-secret";
+      }
+    });
+    attemptMutation(() => {
+      serialized.steps[0].status = "not_run";
+    });
+
+    expect(state.steps()[0].status).toBe("failed");
+    expect(JSON.stringify(state.events())).not.toContain("raw-event-secret");
   });
 
   it("preserves retryable connector errors and normalizes history codes", () => {
@@ -212,4 +280,12 @@ function captureRunError(operation: () => unknown): RunError {
     return error as RunError;
   }
   throw new Error("expected operation to throw RunError");
+}
+
+function attemptMutation(operation: () => void): void {
+  try {
+    operation();
+  } catch (error) {
+    expect(error).toBeInstanceOf(TypeError);
+  }
 }
