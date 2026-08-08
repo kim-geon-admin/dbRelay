@@ -2,30 +2,38 @@
   "name": "db-relay",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc --noEmit && vite build",
+    "package": "pnpm build && electron-builder --win",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3 -w oracledb",
     "test": "vitest run",
-    "lint": "tsc --noEmit",
-    "tauri": "tauri"
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",
     "@tauri-apps/plugin-opener": "^2.5.3",
+    "better-sqlite3": "^13.0.3",
+    "oracledb": "^6.2.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
     "@tauri-apps/cli": "^2.10.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
+    "@types/node": "^26.1.2",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.1",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
     "jsdom": "^27.0.1",
     "typescript": "~5.9.3",
     "vite": "^7.1.7",
+    "vite-plugin-electron": "^1.1.1",
     "vitest": "^4.0.3"
   }
 }
