@@ -14,8 +14,8 @@ use crate::{
         RunHistoryEntry,
     },
     domain::{
-        ConnectionProfile, CredentialStorage, DbKind, Flow, QueryStep, RecoveryAction, RunError, RunEvent, RunState,
-        RunStatus, StepStatus, TransactionPolicy,
+        ConnectionProfile, CredentialStorage, DbKind, Flow, QueryStep, RecoveryAction, RunError,
+        RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy,
     },
 };
 

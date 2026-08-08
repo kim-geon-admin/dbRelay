@@ -161,6 +161,18 @@ fn flow_request_rejects_unsafe_source_and_target_statements() {
 }
 
 #[test]
+fn flow_request_accepts_insert_and_update_target_statements() {
+    for target_sql in [
+        "INSERT INTO customer (id, email) VALUES (:ID, :EMAIL)",
+        "UPDATE customer SET email = :EMAIL WHERE id = :ID",
+    ] {
+        let mut request = valid_flow_request();
+        request.query_steps[0].upsert_sql = target_sql.into();
+        assert!(request.into_flow().is_ok());
+    }
+}
+
+#[test]
 fn flow_request_rejects_the_same_connection_as_source_and_target() {
     let mut request = valid_flow_request();
     request.target_connection_id = request.source_connection_id.clone();

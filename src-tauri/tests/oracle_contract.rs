@@ -1,6 +1,9 @@
 use db_relay::{
     connectors::{ConnectorRegistry, OracleConnector},
-    domain::{ConnectionProfile, CredentialStorage, DbKind, NamedRow, OracleDate, OracleTimestamp, Row, Value},
+    domain::{
+        ConnectionProfile, CredentialStorage, DbKind, NamedRow, OracleDate, OracleTimestamp, Row,
+        Value,
+    },
 };
 use std::collections::BTreeMap;
 

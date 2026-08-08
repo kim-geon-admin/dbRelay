@@ -12,14 +12,14 @@ type FormState = {
   kind: DbKind;
   host: string;
   port: string;
-  serviceName: string;
+  sid: string;
   username: string;
   password: string;
 };
 type TextField = keyof FormState;
 
 function blankForm(): FormState {
-  return { displayName: "", kind: "oracle", host: "", port: "1521", serviceName: "", username: "", password: "" };
+  return { displayName: "", kind: "oracle", host: "", port: "1521", sid: "", username: "", password: "" };
 }
 
 function formFor(connection?: Connection): FormState {
@@ -29,7 +29,7 @@ function formFor(connection?: Connection): FormState {
     kind: connection.kind,
     host: connection.host,
     port: String(connection.port),
-    serviceName: connection.serviceName,
+    sid: connection.sid,
     username: connection.username,
     password: connection.passwordMask,
   };
@@ -58,7 +58,7 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const required: Array<[TextField, string]> = [
-      ["displayName", "Display name"], ["host", "Host"], ["serviceName", "Service name"], ["username", "Username"],
+      ["displayName", "Display name"], ["host", "Host"], ["sid", "SID"], ["username", "Username"],
     ];
     const missing = required.find(([field]) => !values[field].trim());
     if (missing) return setError(`${missing[1]} is required.`);
@@ -71,7 +71,7 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
       await onSave({
         id: connection?.id ?? connectionId(),
         displayName: values.displayName.trim(), kind: values.kind, host: values.host.trim(), port,
-        serviceName: values.serviceName.trim(), username: values.username.trim(),
+        sid: values.sid.trim(), username: values.username.trim(),
         ...(connection ? { enabled: connection.enabled } : {}),
         ...((!connection || passwordChanged) && values.password ? { password: values.password } : {}),
       });
@@ -90,11 +90,12 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
       <label>Database kind<select aria-label="Database kind" value={values.kind} onChange={(event) => update("kind", event.target.value as DbKind)}><option value="oracle">Oracle</option></select></label>
       <label>Host<input aria-label="Host" value={values.host} onChange={(event) => update("host", event.target.value)} /></label>
       <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
-      <label>Service name<input aria-label="Service name" value={values.serviceName} onChange={(event) => update("serviceName", event.target.value)} /></label>
+      <label>SID<input aria-label="SID" value={values.sid} onChange={(event) => update("sid", event.target.value)} /></label>
       <label>Username<input aria-label="Username" value={values.username} onChange={(event) => update("username", event.target.value)} /></label>
       <label>Password<input aria-label="Password" type="text" autoComplete="new-password" value={values.password} onFocus={(event) => {
         if (connection && !passwordChanged) {
-          event.currentTarget.select();
+          const caret = event.currentTarget.value.length;
+          event.currentTarget.setSelectionRange(caret, caret);
         }
       }} onChange={(event) => {
         setPasswordChanged(true);

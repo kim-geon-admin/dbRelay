@@ -2,7 +2,9 @@ import type { Connection } from "../connections/connections.types";
 
 export type TransactionPolicy = "all_or_nothing" | "commit_successes";
 
-export type QueryStep = { id: string; selectSql: string; upsertSql: string };
+export type QueryOperation = "insert" | "update";
+
+export type QueryStep = { id: string; selectSql: string; upsertSql: string; operation?: QueryOperation };
 
 export type Flow = {
   id: string;
@@ -18,5 +20,5 @@ export type FlowEditorProps = {
   connections: Connection[];
   initialFlow?: Flow;
   onSave: (flow: Flow) => void | Promise<void>;
+  onCancel?: () => void;
 };
-

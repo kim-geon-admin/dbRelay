@@ -9,8 +9,8 @@ use crate::{
     },
     domain::{
         extract_named_binds, map_row, validate_row_set_columns, validate_source_statement,
-        validate_target_statement, ConnectionProfile, CredentialStorage, DbKind, Flow, RecoveryAction, RunError,
-        RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy,
+        validate_target_statement, ConnectionProfile, CredentialStorage, DbKind, Flow,
+        RecoveryAction, RunError, RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy,
     },
 };
 
@@ -1082,10 +1082,7 @@ impl<
                 .clone()
                 .map(ResolvedSecret::new)
                 .ok_or_else(|| {
-                    PortError::new(
-                        "CREDENTIAL_NOT_FOUND",
-                        "plaintext password was not found",
-                    )
+                    PortError::new("CREDENTIAL_NOT_FOUND", "plaintext password was not found")
                 });
         }
         match self.credentials.resolve(&profile.credential_ref).await {

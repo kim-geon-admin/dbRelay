@@ -9,8 +9,8 @@ use db_relay::{
         },
     },
     domain::{
-        ConnectionProfile, CredentialStorage, DbKind, Flow, NamedRow, QueryStep, RecoveryAction, RowSet, RunError,
-        RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy, Value,
+        ConnectionProfile, CredentialStorage, DbKind, Flow, NamedRow, QueryStep, RecoveryAction,
+        RowSet, RunError, RunEvent, RunState, RunStatus, StepStatus, TransactionPolicy, Value,
     },
     infrastructure::sqlite::SqliteStore,
 };

@@ -4,7 +4,7 @@ use db_relay::domain::{
 };
 
 #[test]
-fn accepts_read_only_source_queries_and_oracle_merge_targets() {
+fn accepts_read_only_source_queries_and_oracle_write_targets() {
     assert!(validate_source_statement("SELECT id FROM customer").is_ok());
     assert!(validate_source_statement(
         "/* report */ WITH c AS (SELECT id FROM customer) SELECT id FROM c"
@@ -13,6 +13,16 @@ fn accepts_read_only_source_queries_and_oracle_merge_targets() {
     assert!(validate_target_statement(
         DbKind::Oracle,
         "MERGE INTO customer target USING dual ON (1 = 1) WHEN MATCHED THEN UPDATE SET target.id = 1",
+    )
+    .is_ok());
+    assert!(validate_target_statement(
+        DbKind::Oracle,
+        "INSERT INTO customer (id, email) VALUES (:ID, :EMAIL)",
+    )
+    .is_ok());
+    assert!(validate_target_statement(
+        DbKind::Oracle,
+        "UPDATE customer SET email = :EMAIL WHERE id = :ID",
     )
     .is_ok());
 }

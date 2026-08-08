@@ -26,6 +26,14 @@ select {
   font: inherit;
 }
 
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
 :focus-visible {
   outline: 3px solid color-mix(in srgb, var(--color-coral) 55%, transparent);
   outline-offset: 3px;
@@ -71,8 +79,8 @@ select {
 .app-navigation__link {
   display: flex;
   align-items: center;
-  min-height: 44px;
-  padding: 10px var(--space-3);
+  min-height: 35px;
+  padding: 8px var(--space-3);
   border-radius: var(--radius-md);
   color: var(--color-on-dark-muted);
   font-size: 0.875rem;
@@ -227,13 +235,14 @@ select {
 .section-heading,
 .editor-actions,
 .connection-card,
-.flow-library {
+.flow-card {
   display: flex;
   gap: var(--space-3);
 }
 
 .section-heading,
-.connection-card {
+.connection-card,
+.flow-card {
   align-items: center;
   justify-content: space-between;
 }
@@ -241,7 +250,7 @@ select {
 .editor-form,
 .query-step,
 .connection-card,
-.flow-library > aside {
+.flow-card {
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-lg);
   background: var(--color-card);
@@ -267,8 +276,8 @@ select {
 .editor-form textarea,
 .editor-form button,
 .connection-card button,
-.flow-library button {
-  min-height: 40px;
+.flow-card button {
+  min-height: 32px;
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-md);
   background: var(--color-canvas);
@@ -290,7 +299,8 @@ select {
   font-weight: 400;
 }
 
-.connection-list {
+.connection-list,
+.flow-list {
   display: grid;
   gap: var(--space-3);
   margin: var(--space-5) 0;
@@ -298,27 +308,42 @@ select {
   list-style: none;
 }
 
-.connection-card {
+.connection-card,
+.flow-card {
   padding: var(--space-4);
 }
 
-.connection-card p {
+.connection-card p,
+.flow-card p {
   margin: var(--space-1) 0 0;
   color: var(--color-body);
   font-family: var(--font-code);
   font-size: 0.875rem;
 }
 
-.flow-library {
-  align-items: flex-start;
-  margin-top: var(--space-5);
+.flow-editor {
+  width: 100%;
+  max-width: none;
+  gap: 12px;
+  margin: 24px 0;
+  padding: 24px;
 }
 
-.flow-library > aside {
-  display: grid;
-  gap: var(--space-2);
-  min-width: 220px;
-  padding: var(--space-4);
+.flow-editor label {
+  gap: 4px;
+}
+
+.flow-editor input,
+.flow-editor select,
+.flow-editor textarea,
+.flow-editor button {
+  min-height: 40px;
+  padding: 8px 10px;
+}
+
+.flow-editor .section-heading,
+.flow-editor .editor-actions {
+  gap: 12px;
 }
 
 .query-step {
@@ -328,12 +353,21 @@ select {
   padding: var(--space-4);
 }
 
+.flow-editor .query-step {
+  gap: 12px;
+  padding: 16px;
+}
+
 .sql-editor {
-  min-height: 120px;
+  width: 100%;
   resize: vertical;
   font-family: var(--font-code);
   font-size: 0.875rem;
   line-height: 1.5;
+}
+
+.flow-editor .sql-editor {
+  min-height: 220px;
 }
 
 .run-dashboard,
@@ -352,8 +386,8 @@ select {
 }
 
 .run-flow-picker select {
-  min-height: 40px;
-  padding: 8px 10px;
+  min-height: 32px;
+  padding: 6px 8px;
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-md);
   background: var(--color-canvas);
@@ -395,7 +429,7 @@ select {
 }
 
 .run-history > aside button {
-  min-height: 40px;
+  min-height: 32px;
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-md);
   background: var(--color-canvas);
@@ -429,7 +463,7 @@ select {
 @media (max-width: 767px) {
   .section-heading,
   .connection-card,
-  .flow-library {
+  .flow-card {
     align-items: stretch;
     flex-direction: column;
   }

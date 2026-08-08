@@ -5,7 +5,7 @@ export type Connection = {
   kind: DbKind;
   host: string;
   port: number;
-  serviceName: string;
+  sid: string;
   username: string;
   passwordMask: string;
   enabled: boolean;

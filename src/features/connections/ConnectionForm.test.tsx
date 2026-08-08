@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 import { ConnectionForm } from "./ConnectionForm";
 
-it("does not submit a connection with an empty service name", () => {
+it("does not submit a connection with an empty SID", () => {
   const onSave = vi.fn();
 
   render(<ConnectionForm onSave={onSave} />);
@@ -13,14 +13,37 @@ it("does not submit a connection with an empty service name", () => {
   fireEvent.change(screen.getByLabelText("Username"), { target: { value: "relay" } });
   fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
-  expect(screen.getByText("Service name is required.")).toBeVisible();
+  expect(screen.getByText("SID is required.")).toBeVisible();
   expect(onSave).not.toHaveBeenCalled();
+});
+
+it("submits an SID", () => {
+  const onSave = vi.fn();
+
+  render(<ConnectionForm connection={{
+    id: "production", displayName: "Production", kind: "oracle", host: "db.example.test", port: 1521,
+    sid: "ORCL", username: "relay", passwordMask: "********", enabled: true,
+  }} onSave={onSave} />);
+
+  fireEvent.change(screen.getByLabelText("SID"), { target: { value: "ORCL2" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
+
+  expect(onSave).toHaveBeenCalledWith({
+    id: "production",
+    displayName: "Production",
+    kind: "oracle",
+    host: "db.example.test",
+    port: 1521,
+    sid: "ORCL2",
+    username: "relay",
+    enabled: true,
+  });
 });
 
 it("shows a saved password as stars without a checkbox", () => {
   render(<ConnectionForm connection={{
     id: "production", displayName: "Production", kind: "oracle", host: "db.example.test", port: 1521,
-    serviceName: "ORCLPDB1", username: "relay", credentialStorage: "keyring", passwordMask: "********", enabled: true,
+    sid: "ORCL", username: "relay", credentialStorage: "keyring", passwordMask: "********", enabled: true,
   } as never} onSave={vi.fn()} />);
 
   const password = screen.getByLabelText("Password");
@@ -30,18 +53,18 @@ it("shows a saved password as stars without a checkbox", () => {
   expect(screen.queryByLabelText("Source account is read-only")).not.toBeInTheDocument();
 });
 
-it("keeps the mask on focus and submits a directly typed plaintext replacement", () => {
+it("places the caret after the password mask on focus", () => {
   const onSave = vi.fn();
   render(<ConnectionForm connection={{
     id: "production", displayName: "Production", kind: "oracle", host: "db.example.test", port: 1521,
-    serviceName: "ORCLPDB1", username: "relay", passwordMask: "********", enabled: true,
+    sid: "ORCL", username: "relay", passwordMask: "********", enabled: true,
   }} onSave={onSave} />);
 
   const password = screen.getByLabelText("Password") as HTMLInputElement;
   fireEvent.focus(password);
 
   expect(password).toHaveValue("********");
-  expect(password.selectionStart).toBe(0);
+  expect(password.selectionStart).toBe(8);
   expect(password.selectionEnd).toBe(8);
 
   fireEvent.change(password, { target: { value: "new-plaintext-password" } });

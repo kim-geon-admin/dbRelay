@@ -19,15 +19,15 @@
   --font-body: Inter, "Segoe UI", sans-serif;
   --font-code: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
-  --space-7: 48px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --space-1: 3px;
+  --space-2: 6px;
+  --space-3: 10px;
+  --space-4: 13px;
+  --space-5: 19px;
+  --space-6: 26px;
+  --space-7: 38px;
+  --radius-sm: 5px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
   --radius-pill: 9999px;
 }

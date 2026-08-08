@@ -4,7 +4,7 @@ export type CommandError = { title: string; detail: string; code: string; runId?
 
 type ConnectionDto = {
   id: string; displayName: string; kind: "oracle"; host: string; port: number;
-  serviceName: string; username: string; passwordMask: string; enabled: boolean;
+  sid: string; username: string; passwordMask: string; enabled: boolean;
 };
 type FlowDto = {
   id: string; name: string; sourceConnectionId: string; targetConnectionId: string;

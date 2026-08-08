@@ -3,10 +3,10 @@ import { QueryStepEditor } from "./QueryStepEditor";
 import type { Flow, FlowEditorProps, QueryStep, TransactionPolicy } from "./flows.types";
 
 function nextId(prefix: string) { return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}`; }
-function newStep(): QueryStep { return { id: nextId("step"), selectSql: "", upsertSql: "" }; }
+function newStep(): QueryStep { return { id: nextId("step"), operation: "insert", selectSql: "", upsertSql: "" }; }
 function newFlow(): Flow { return { id: nextId("flow"), name: "", sourceConnectionId: "", targetConnectionId: "", querySteps: [newStep()], transactionPolicy: "all_or_nothing", version: 0 }; }
 
-export function FlowEditor({ connections, initialFlow, onSave }: FlowEditorProps) {
+export function FlowEditor({ connections, initialFlow, onSave, onCancel }: FlowEditorProps) {
   const [flow, setFlow] = useState<Flow>(() => initialFlow ?? newFlow());
   const [error, setError] = useState<string>();
   const [saving, setSaving] = useState(false);
@@ -34,7 +34,7 @@ export function FlowEditor({ connections, initialFlow, onSave }: FlowEditorProps
     finally { setSaving(false); }
   };
 
-  return <form className="editor-form" onSubmit={submit} noValidate>
+  return <form className="editor-form flow-editor" onSubmit={submit} noValidate>
     <h2>{initialFlow ? "Edit flow" : "New flow"}</h2>
     <label>Flow name<input value={flow.name} onChange={(event) => setFlow({ ...flow, name: event.target.value })} /></label>
     <label>Source connection<select value={flow.sourceConnectionId} onChange={(event) => setFlow({ ...flow, sourceConnectionId: event.target.value })}><option value="">Choose source</option>{connections.filter((connection) => connection.enabled).map((connection) => <option value={connection.id} key={connection.id}>{connection.displayName}</option>)}</select></label>
@@ -43,6 +43,9 @@ export function FlowEditor({ connections, initialFlow, onSave }: FlowEditorProps
     <div className="section-heading"><h3>Query steps</h3><button type="button" onClick={() => setFlow((current) => ({ ...current, querySteps: [...current.querySteps, newStep()] }))}>Add step</button></div>
     {flow.querySteps.map((step, index) => <QueryStepEditor key={step.id} step={step} position={index} total={flow.querySteps.length} onChange={(next) => updateStep(index, next)} onMove={(direction) => moveStep(index, direction)} onDelete={() => setFlow((current) => ({ ...current, querySteps: current.querySteps.filter((_, itemIndex) => itemIndex !== index) }))} />)}
     {error ? <p role="alert">{error}</p> : null}
-    <div className="editor-actions"><button type="submit" disabled={saving}>{saving ? "Saving…" : "Save flow"}</button></div>
+    <div className="editor-actions">
+      {onCancel ? <button type="button" onClick={onCancel}>Cancel</button> : null}
+      <button type="submit" disabled={saving}>{saving ? "Saving…" : "Save flow"}</button>
+    </div>
   </form>;
 }

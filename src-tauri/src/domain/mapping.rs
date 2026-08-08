@@ -3,12 +3,12 @@ use std::collections::HashSet;
 use super::{DbKind, MappingError, NamedRow, Row, RowSet, ValidationError, Value};
 
 pub fn validate_source_statement(sql: &str) -> Result<(), ValidationError> {
-    validate_statement(sql, "SELECT", true)
+    validate_statement(sql, true)
 }
 
 pub fn validate_target_statement(kind: DbKind, sql: &str) -> Result<(), ValidationError> {
     match kind {
-        DbKind::Oracle => validate_statement(sql, "MERGE", false),
+        DbKind::Oracle => validate_statement(sql, false),
     }
 }
 
@@ -85,11 +85,7 @@ pub fn extract_named_bind_occurrences(sql: &str) -> Result<Vec<String>, MappingE
     Ok(binds)
 }
 
-fn validate_statement(
-    sql: &str,
-    expected_first_keyword: &str,
-    source: bool,
-) -> Result<(), ValidationError> {
+fn validate_statement(sql: &str, source: bool) -> Result<(), ValidationError> {
     let lexical = lexical_sql(sql)?;
     let tokens = lexical
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
@@ -100,13 +96,13 @@ fn validate_statement(
     let has_expected_first_keyword = if source {
         matches!(tokens.first().map(String::as_str), Some("SELECT" | "WITH"))
     } else {
-        tokens.first().map(String::as_str) == Some(expected_first_keyword)
+        matches!(tokens.first().map(String::as_str), Some("INSERT" | "UPDATE" | "MERGE"))
     };
     if !has_expected_first_keyword {
         return Err(ValidationError::new(if source {
             "source SQL must begin with SELECT or WITH"
         } else {
-            "Oracle target SQL must begin with MERGE"
+            "Oracle target SQL must begin with INSERT, UPDATE, or MERGE"
         }));
     }
 
