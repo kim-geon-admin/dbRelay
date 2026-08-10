@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { resolve } from "node:path";
 
@@ -9,6 +9,21 @@ import { DB_RELAY_COMMANDS } from "./commands";
 const workspace = resolve(import.meta.dirname, "../..");
 
 describe("Electron process boundaries", () => {
+  it("contains no active Tauri or Rust runtime references", () => {
+    const obsoleteReferences = [
+      ["@", "tauri-apps"].join(""),
+      ["src", "tauri"].join("-"),
+      ["cargo", "test"].join(" "),
+      ["pnpm", "tauri"].join(" "),
+    ];
+    const activeSources = repositoryFiles(workspace);
+
+    expect(existsSync(resolve(workspace, ["src", "tauri"].join("-")))).toBe(false);
+    expect(activeSources.flatMap((file) => obsoleteReferences
+      .filter((reference) => readFileSync(file, "utf8").includes(reference))
+      .map((reference) => ({ file, reference })))).toEqual([]);
+  });
+
   it("keeps database, Electron-main, and Node imports out of the renderer", () => {
     const renderer = productionFiles(resolve(workspace, "src"));
     const nodeBuiltins = new Set(builtinModules.map((name) => name.replace(/^node:/u, "")));
@@ -45,6 +60,33 @@ describe("Electron process boundaries", () => {
     expect(connectionProjection).not.toMatch(/plaintext|credentialRef|\bsecret\b/iu);
   });
 });
+
+function repositoryFiles(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = resolve(root, entry.name);
+    if (entry.isDirectory()) {
+      return isExcludedPath(path) ? [] : repositoryFiles(path);
+    }
+    return statSync(path).isFile() && /\.(?:json|md|rs|toml|ts|tsx|yaml|yml)$/u.test(path)
+      ? [path]
+      : [];
+  });
+}
+
+function isExcludedPath(path: string): boolean {
+  const relative = path.slice(workspace.length + 1).replace(/\\/gu, "/");
+  const excludedRoots = [
+    ".git",
+    ".superpowers",
+    "dist",
+    "dist-electron",
+    "node_modules",
+    "release",
+    "docs/superpowers",
+    "docs/exec-plans/completed",
+  ];
+  return excludedRoots.some((root) => relative === root || relative.startsWith(`${root}/`));
+}
 
 function productionFiles(root: string): string[] {
   return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {

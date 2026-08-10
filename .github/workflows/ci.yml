@@ -24,31 +24,17 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Install frontend dependencies
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Check Rust formatting
-        run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
-
-      - name: Lint Rust
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-
-      - name: Test Rust
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-support
-
-      - name: Lint frontend
-        run: pnpm lint
-
-      - name: Test frontend
+      - name: Test
         run: pnpm test
 
-      - name: Build frontend
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
         run: pnpm build
 
-      - name: Build desktop application
-        run: pnpm tauri build
+      - name: Package Windows application
+        run: pnpm package

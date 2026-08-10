@@ -24,13 +24,13 @@ pnpm package
 
 ## Credentials and local data
 
-Connection metadata and flow definitions are stored locally in SQLite. Passwords are stored in Windows Credential Manager under the stable connection ID; SQLite stores only the credential reference. When editing a saved connection, the password field displays `*` characters matching the password length, never the password itself. SQL text, bind values, source rows, and execution-history diagnostics are never returned by the command API or recorded in run history.
+Connection metadata, flow definitions, and current connection passwords are stored locally in SQLite. Password storage is plaintext, so protect the local database as a sensitive file. When editing a saved connection, the password field displays `*` characters matching the password length, never the password itself. The Electron main process does not send plaintext passwords, credential references, bind values, source rows, or raw execution inputs to the renderer or record them in run history.
 
-Oracle `DATE` and timezone-free `TIMESTAMP` source values are carried as typed Oracle binds. Ambiguous textual timestamps and timestamps with an offset are rejected during preflight before a target transaction opens; `oracle-rs` 0.1.7 batch binding does not preserve the latter's timezone representation.
+Oracle connectivity runs only in the Electron main process through `oracledb@^6.2.0`. Oracle `DATE` and timezone-free `TIMESTAMP` source values are carried as typed Oracle binds. Ambiguous textual timestamps and timestamps with an offset are rejected during preflight before a target transaction opens.
 
 ## Source-account safety policy
 
-Source connections do not have an application-enforced read-only mode: `oracle-rs` 0.1.7 exposes query, execute, commit, and rollback operations but no supported API for an Oracle read-only session or `SET TRANSACTION READ ONLY`. Configure the selected Oracle source principal itself with only the minimum `SELECT` grants required by the flow, and do not grant DML, DDL, transaction-control, or executable routine privileges that could mutate data.
+Source connections do not have an application-enforced read-only mode. Configure the selected Oracle source principal itself with only the minimum `SELECT` grants required by the flow, and do not grant DML, DDL, transaction-control, or executable routine privileges that could mutate data.
 
 The application's `SELECT`/`WITH` validation is a defense-in-depth syntax check only. It cannot prove that an Oracle function called inside a `SELECT` has no side effects; database principal privileges are the enforcement boundary.
 
@@ -40,9 +40,20 @@ Run the release checks from the repository root:
 
 ```powershell
 pnpm test
+pnpm lint
 pnpm build
 pnpm package
 ```
+
+The renderer is sandboxed from Node and databases. A context-isolated preload exposes only the typed DB Relay command allowlist; the Electron main process owns IPC validation, SQLite, and Oracle sessions.
+
+The Oracle integration test is opt-in. Set `DB_RELAY_ORACLE_TEST_URL` to `oracle://user:password@host:port/SID`, URL-encoding reserved characters in credentials, and run:
+
+```powershell
+pnpm vitest run electron/connectors/oracle.integration.test.ts
+```
+
+The test skips when the variable is absent.
 
 After installing dependencies for a new Electron version, rebuild the native modules:
 
