@@ -84,7 +84,7 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
   };
 
   return (
-    <form className="editor-form" onSubmit={submit} noValidate>
+    <form className="editor-form connection-form" onSubmit={submit} noValidate>
       <h2>{connection ? "Edit connection" : "New connection"}</h2>
       <label>Display name<input aria-label="Display name" value={values.displayName} onChange={(event) => update("displayName", event.target.value)} /></label>
       <label>Database kind<select aria-label="Database kind" value={values.kind} onChange={(event) => update("kind", event.target.value as DbKind)}><option value="oracle">Oracle</option></select></label>

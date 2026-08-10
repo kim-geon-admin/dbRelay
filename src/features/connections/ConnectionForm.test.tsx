@@ -2,6 +2,13 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 import { ConnectionForm } from "./ConnectionForm";
 
+it("marks the connection editor for scoped responsive layout", () => {
+  render(<ConnectionForm onSave={vi.fn()} />);
+
+  expect(screen.getByRole("button", { name: "Save connection" }).closest("form"))
+    .toHaveClass("connection-form");
+});
+
 it("does not submit a connection with an empty SID", () => {
   const onSave = vi.fn();
 
