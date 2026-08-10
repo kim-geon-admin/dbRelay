@@ -9,19 +9,20 @@ import { DB_RELAY_COMMANDS } from "./commands";
 const workspace = resolve(import.meta.dirname, "../..");
 
 describe("Electron process boundaries", () => {
-  it("contains no active Tauri or Rust runtime references", () => {
-    const obsoleteReferences = [
-      ["@", "tauri-apps"].join(""),
-      ["src", "tauri"].join("-"),
-      ["cargo", "test"].join(" "),
-      ["pnpm", "tauri"].join(" "),
-    ];
+  it("contains no active retired-runtime references", () => {
+    const obsoleteRuntimeName = ["tau", "ri"].join("");
     const activeSources = repositoryFiles(workspace);
 
-    expect(existsSync(resolve(workspace, ["src", "tauri"].join("-")))).toBe(false);
-    expect(activeSources.flatMap((file) => obsoleteReferences
-      .filter((reference) => readFileSync(file, "utf8").includes(reference))
-      .map((reference) => ({ file, reference })))).toEqual([]);
+    expect(existsSync(resolve(workspace, ["src", obsoleteRuntimeName].join("-")))).toBe(false);
+    expect(activeSources.flatMap((file) => {
+      const relative = file.slice(workspace.length + 1).replace(/\\/gu, "/");
+      const matches = [];
+      if (relative.toLowerCase().includes(obsoleteRuntimeName)) matches.push("path");
+      if (readFileSync(file, "utf8").toLowerCase().includes(obsoleteRuntimeName)) {
+        matches.push("content");
+      }
+      return matches.map((match) => ({ file: relative, match }));
+    })).toEqual([]);
   });
 
   it("keeps database, Electron-main, and Node imports out of the renderer", () => {
@@ -52,7 +53,7 @@ describe("Electron process boundaries", () => {
   });
 
   it("limits renderer connection responses to passwordMask", () => {
-    const facade = readFileSync(resolve(workspace, "src/lib/tauri.ts"), "utf8");
+    const facade = readFileSync(resolve(workspace, "src/lib/desktop.ts"), "utf8");
     const connectionProjection = /type ConnectionDto = \{(?<body>[\s\S]*?)\n\};/u.exec(facade)
       ?.groups?.body ?? "";
 
@@ -67,7 +68,8 @@ function repositoryFiles(root: string): string[] {
     if (entry.isDirectory()) {
       return isExcludedPath(path) ? [] : repositoryFiles(path);
     }
-    return statSync(path).isFile() && /\.(?:json|md|rs|toml|ts|tsx|yaml|yml)$/u.test(path)
+    return statSync(path).isFile()
+      && (entry.name === ".gitignore" || /\.(?:json|md|rs|toml|ts|tsx|yaml|yml)$/u.test(path))
       ? [path]
       : [];
   });

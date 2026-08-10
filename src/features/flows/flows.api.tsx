@@ -1,4 +1,4 @@
-import { invokeCommand } from "../../lib/tauri";
+import { invokeCommand } from "../../lib/desktop";
 import type { Flow } from "./flows.types";
 
 export function listFlows(): Promise<Flow[]> { return invokeCommand("list_flows"); }

@@ -1,4 +1,4 @@
-import { invokeCommand } from "../../lib/tauri";
+import { invokeCommand } from "../../lib/desktop";
 import type { Connection, ConnectionSaveInput, ConnectionTestResult } from "./connections.types";
 
 export function listConnections(): Promise<Connection[]> {

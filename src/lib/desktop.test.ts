@@ -1,4 +1,4 @@
-import { invokeCommand } from "./tauri";
+import { invokeCommand } from "./desktop";
 
 it("forwards an allowed typed command to the preload bridge", async () => {
   window.dbRelay = { invoke: vi.fn().mockResolvedValue([]) };

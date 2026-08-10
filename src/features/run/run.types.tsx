@@ -1,4 +1,4 @@
-import type { RunDto, RunEventDto, RunStatusDto, StepStatusDto } from "../../lib/tauri";
+import type { RunDto, RunEventDto, RunStatusDto, StepStatusDto } from "../../lib/desktop";
 
 export type Run = RunDto;
 export type RunStatus = RunStatusDto;

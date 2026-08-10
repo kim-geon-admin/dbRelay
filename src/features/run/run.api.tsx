@@ -1,4 +1,4 @@
-import { invokeCommand } from "../../lib/tauri";
+import { invokeCommand } from "../../lib/desktop";
 import type { RecoveryRequest, Run } from "./run.types";
 
 export function startRun(flowId: string): Promise<Run> {
