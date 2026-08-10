@@ -288,6 +288,14 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) minmax(72px, 0.45fr) minmax(0, 1fr);
 }
 
+.connection-settings .connection-form__connection-details > label {
+  min-width: 0;
+}
+
+.connection-settings .connection-form__connection-details input {
+  width: 100%;
+}
+
 .connection-settings .connection-form input,
 .connection-settings .connection-form select,
 .connection-settings .connection-form button {
