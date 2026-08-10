@@ -273,8 +273,16 @@ button:disabled {
 
 .connection-settings .connection-form > h2,
 .connection-settings .connection-form > [role="alert"],
-.connection-settings .connection-form > .editor-actions {
+.connection-settings .connection-form > .editor-actions,
+.connection-settings .connection-form > .connection-form__field-pair,
+.connection-settings .connection-form > .connection-form__full-width-field {
   grid-column: 1 / -1;
+}
+
+.connection-settings .connection-form__field-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(16px, 2vw, var(--space-6));
 }
 
 .connection-settings .connection-form input,
@@ -286,6 +294,7 @@ button:disabled {
 
 @media (max-width: 767px) {
   .connection-settings .connection-form { grid-template-columns: 1fr; }
+  .connection-settings .connection-form__field-pair { grid-template-columns: 1fr; }
 }
 
 .editor-form label,

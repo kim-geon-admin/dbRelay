@@ -88,19 +88,23 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
       <h2>{connection ? "Edit connection" : "New connection"}</h2>
       <label>Display name<input aria-label="Display name" value={values.displayName} onChange={(event) => update("displayName", event.target.value)} /></label>
       <label>Database kind<select aria-label="Database kind" value={values.kind} onChange={(event) => update("kind", event.target.value as DbKind)}><option value="oracle">Oracle</option></select></label>
-      <label>Host<input aria-label="Host" value={values.host} onChange={(event) => update("host", event.target.value)} /></label>
-      <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
-      <label>SID<input aria-label="SID" value={values.sid} onChange={(event) => update("sid", event.target.value)} /></label>
-      <label>Username<input aria-label="Username" value={values.username} onChange={(event) => update("username", event.target.value)} /></label>
-      <label>Password<input aria-label="Password" type="text" autoComplete="new-password" value={values.password} onFocus={(event) => {
-        if (connection && !passwordChanged) {
-          const caret = event.currentTarget.value.length;
-          event.currentTarget.setSelectionRange(caret, caret);
-        }
-      }} onChange={(event) => {
-        setPasswordChanged(true);
-        update("password", event.target.value);
-      }} /></label>
+      <div className="connection-form__field-pair">
+        <label>Host<input aria-label="Host" value={values.host} onChange={(event) => update("host", event.target.value)} /></label>
+        <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
+      </div>
+      <label className="connection-form__full-width-field">SID<input aria-label="SID" value={values.sid} onChange={(event) => update("sid", event.target.value)} /></label>
+      <div className="connection-form__field-pair">
+        <label>Username<input aria-label="Username" value={values.username} onChange={(event) => update("username", event.target.value)} /></label>
+        <label>Password<input aria-label="Password" type="text" autoComplete="new-password" value={values.password} onFocus={(event) => {
+          if (connection && !passwordChanged) {
+            const caret = event.currentTarget.value.length;
+            event.currentTarget.setSelectionRange(caret, caret);
+          }
+        }} onChange={(event) => {
+          setPasswordChanged(true);
+          update("password", event.target.value);
+        }} /></label>
+      </div>
       {error ? <p role="alert">{error}</p> : null}
       <div className="editor-actions">
         {onCancel ? <button type="button" onClick={onCancel}>Cancel</button> : null}
