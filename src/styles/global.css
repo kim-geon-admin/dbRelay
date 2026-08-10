@@ -264,6 +264,30 @@ button:disabled {
   padding: var(--space-5);
 }
 
+.connection-settings .connection-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(6px, 1vh, var(--space-3));
+  margin: clamp(10px, 2vh, var(--space-5)) 0;
+  padding: clamp(10px, 2vh, var(--space-5));
+}
+
+.connection-settings .connection-form > h2,
+.connection-settings .connection-form > [role="alert"],
+.connection-settings .connection-form > .editor-actions {
+  grid-column: 1 / -1;
+}
+
+.connection-settings .connection-form input,
+.connection-settings .connection-form select,
+.connection-settings .connection-form button {
+  min-height: 0;
+  padding-block: clamp(4px, 0.7vh, 8px);
+}
+
+@media (max-width: 767px) {
+  .connection-settings .connection-form { grid-template-columns: 1fr; }
+}
+
 .editor-form label,
 .query-step label {
   display: grid;
