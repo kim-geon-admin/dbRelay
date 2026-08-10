@@ -90,8 +90,10 @@ export function ConnectionForm({ connection, onSave, onCancel }: ConnectionFormP
       <label>Database kind<select aria-label="Database kind" value={values.kind} onChange={(event) => update("kind", event.target.value as DbKind)}><option value="oracle">Oracle</option></select></label>
       <div className="connection-form__field-pair connection-form__connection-details">
         <label>Host<input aria-label="Host" value={values.host} onChange={(event) => update("host", event.target.value)} /></label>
-        <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
-        <label>SID<input aria-label="SID" value={values.sid} onChange={(event) => update("sid", event.target.value)} /></label>
+        <div className="connection-form__port-sid-fields">
+          <label>Port<input aria-label="Port" inputMode="numeric" value={values.port} onChange={(event) => update("port", event.target.value)} /></label>
+          <label>SID<input aria-label="SID" value={values.sid} onChange={(event) => update("sid", event.target.value)} /></label>
+        </div>
       </div>
       <div className="connection-form__field-pair">
         <label>Username<input aria-label="Username" value={values.username} onChange={(event) => update("username", event.target.value)} /></label>
