@@ -274,8 +274,7 @@ button:disabled {
 .connection-settings .connection-form > h2,
 .connection-settings .connection-form > [role="alert"],
 .connection-settings .connection-form > .editor-actions,
-.connection-settings .connection-form > .connection-form__field-pair,
-.connection-settings .connection-form > .connection-form__full-width-field {
+.connection-settings .connection-form > .connection-form__field-pair {
   grid-column: 1 / -1;
 }
 
@@ -283,6 +282,10 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: clamp(16px, 2vw, var(--space-6));
+}
+
+.connection-settings .connection-form__connection-details {
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 0.45fr) minmax(0, 1fr);
 }
 
 .connection-settings .connection-form input,

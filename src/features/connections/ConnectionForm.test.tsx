@@ -9,7 +9,7 @@ it("marks the connection editor for scoped responsive layout", () => {
     .toHaveClass("connection-form");
 });
 
-it("groups host and port, then username and password, into field pairs", () => {
+it("groups host, port, and SID, then username and password, into field rows", () => {
   render(<ConnectionForm onSave={vi.fn()} />);
 
   const hostPair = screen.getByLabelText("Host").closest(".connection-form__field-pair");
@@ -17,6 +17,7 @@ it("groups host and port, then username and password, into field pairs", () => {
 
   expect(hostPair).not.toBeNull();
   expect(hostPair).toBe(screen.getByLabelText("Port").closest(".connection-form__field-pair"));
+  expect(hostPair).toBe(screen.getByLabelText("SID").closest(".connection-form__field-pair"));
   expect(usernamePair).not.toBeNull();
   expect(usernamePair).toBe(screen.getByLabelText("Password").closest(".connection-form__field-pair"));
 });
