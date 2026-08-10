@@ -24,7 +24,7 @@ import {
 let repository: SqliteRepository | undefined;
 const trustedRenderers = new Set<WebContents>();
 
-function createWindow(approvedUrl: string) {
+function createWindow(approvedUrl: string, devServerUrl: string | undefined) {
   const window = new BrowserWindow({
     webPreferences: {
       contextIsolation: true,
@@ -44,17 +44,17 @@ function createWindow(approvedUrl: string) {
   webContents.on("will-redirect", preventUntrustedNavigation);
   webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    void window.loadURL(approvedUrl);
+  if (devServerUrl) {
+    void window.loadURL(devServerUrl);
   } else {
     void window.loadFile(join(__dirname, "../dist/index.html"));
   }
 }
 
 app.whenReady().then(() => {
-  const approvedUrl = process.env.VITE_DEV_SERVER_URL
-    ? process.env.VITE_DEV_SERVER_URL
-    : pathToFileURL(join(__dirname, "../dist/index.html")).href;
+  const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
+  const approvedUrl = devServerUrl
+    ?? pathToFileURL(join(__dirname, "../dist/index.html")).href;
   repository = SqliteRepository.open(join(app.getPath("userData"), "db-relay.sqlite"));
   const connector = new OracleConnector();
   registerDbRelayIpc(ipcMain, {
@@ -64,10 +64,10 @@ app.whenReady().then(() => {
     history: new HistoryService(repository),
     connectors: new ConnectorRegistry([connector]),
   }, (event) => isTrustedIpcSender(event, trustedRenderers, approvedUrl));
-  createWindow(approvedUrl);
+  createWindow(approvedUrl, devServerUrl);
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(approvedUrl);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(approvedUrl, devServerUrl);
   });
 });
 

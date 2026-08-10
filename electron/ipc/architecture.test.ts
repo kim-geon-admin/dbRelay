@@ -9,6 +9,17 @@ import { DB_RELAY_COMMANDS } from "./commands";
 const workspace = resolve(import.meta.dirname, "../..");
 
 describe("Electron process boundaries", () => {
+  it("keeps release verification evidence out of the active-runtime scan", () => {
+    const activeSources = repositoryFiles(workspace);
+
+    expect(activeSources).not.toContain(
+      resolve(workspace, "docs/test/reports/2026-08-08-react-electron-migration.md"),
+    );
+    expect(activeSources).toContain(resolve(workspace, "package.json"));
+    expect(activeSources).toContain(resolve(workspace, "electron/main.ts"));
+    expect(activeSources).toContain(resolve(workspace, "docs/product-specs/db-relay.md"));
+  });
+
   it("contains no active retired-runtime references", () => {
     const obsoleteRuntimeName = ["tau", "ri"].join("");
     const activeSources = repositoryFiles(workspace);
@@ -86,6 +97,7 @@ function isExcludedPath(path: string): boolean {
     "release",
     "docs/superpowers",
     "docs/exec-plans/completed",
+    "docs/test/reports",
   ];
   return excludedRoots.some((root) => relative === root || relative.startsWith(`${root}/`));
 }
