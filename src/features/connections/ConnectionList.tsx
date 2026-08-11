@@ -42,7 +42,7 @@ export function ConnectionList() {
         {connections.map((connection) => <li key={connection.id} className="connection-card">
           <div><strong>{connection.displayName}</strong><p>{connection.kind.toUpperCase()} · {connection.host}:{connection.port}/{connection.sid}</p></div>
           <span>{connection.enabled ? "Enabled" : "Disabled"}</span>
-          <div className="editor-actions"><button onClick={() => setEditing(connection)}>Edit</button><button onClick={() => void test(connection)} disabled={!connection.enabled}>Test</button>{connection.enabled ? <button onClick={() => void disable(connection)}>Disable</button> : null}</div>
+          <div className="editor-actions"><button className="connection-card__action" onClick={() => setEditing(connection)}>Edit</button><button className="connection-card__action" onClick={() => void test(connection)} disabled={!connection.enabled}>Test</button>{connection.enabled ? <button className="connection-card__action connection-card__action--warning" onClick={() => void disable(connection)}>Disable</button> : null}</div>
         </li>)}
       </ul>
     </section>

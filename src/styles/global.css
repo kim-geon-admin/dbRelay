@@ -235,8 +235,8 @@ button:disabled {
   display: grid;
   gap: var(--space-3);
   max-width: 760px;
-  margin: var(--space-5) 0;
-  padding: var(--space-5);
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
 }
 
 .connection-settings .connection-form {
@@ -310,7 +310,45 @@ button:disabled {
   border-radius: var(--radius-md);
   background: var(--color-canvas);
   color: inherit;
-  padding: 8px 10px;
+  padding: 6px 8px;
+}
+
+.editor-form,
+.connection-card,
+.flow-card {
+  border-color: color-mix(in srgb, var(--color-hairline) 82%, var(--color-coral));
+  box-shadow: 0 2px 8px rgb(24 23 21 / 5%);
+}
+
+.connection-settings .editor-form,
+.connection-card {
+  border-left: 2px solid var(--color-coral);
+}
+
+.connection-card__action {
+  min-height: 28px;
+  padding: 5px 8px;
+  border-color: color-mix(in srgb, var(--color-hairline) 72%, var(--color-ink));
+  box-shadow: 0 1px 2px rgb(24 23 21 / 10%);
+  transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.connection-card__action:hover:not(:disabled) {
+  background: #fff;
+  border-color: var(--color-coral-active);
+  box-shadow: 0 3px 7px rgb(24 23 21 / 14%);
+  transform: translateY(-1px);
+}
+
+.connection-card__action:disabled {
+  background: color-mix(in srgb, var(--color-card) 72%, var(--color-dark));
+  color: color-mix(in srgb, var(--color-on-dark-muted) 65%, var(--color-card));
+  box-shadow: inset 0 1px 2px rgb(24 23 21 / 18%);
+}
+
+.connection-card__action--warning:hover:not(:disabled) {
+  border-color: var(--color-error);
+  color: var(--color-error);
 }
 
 .editor-form button[type="submit"],
@@ -338,7 +376,7 @@ button:disabled {
 
 .connection-card,
 .flow-card {
-  padding: var(--space-4);
+  padding: var(--space-3);
 }
 
 .connection-card p,
