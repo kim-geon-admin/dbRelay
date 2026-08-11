@@ -240,10 +240,10 @@ button:disabled {
 
 .editor-form {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
   max-width: 760px;
-  margin: var(--space-4) 0;
-  padding: var(--space-4);
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
 }
 
 .connection-settings .connection-form {
@@ -289,8 +289,8 @@ button:disabled {
 .connection-settings .connection-form input,
 .connection-settings .connection-form select,
 .connection-settings .connection-form button {
-  min-height: 0;
-  padding-block: clamp(4px, 0.7vh, 8px);
+  min-height: 30px;
+  padding-block: clamp(4px, 0.7vh, 6px);
 }
 
 @media (max-width: 767px) {
@@ -312,7 +312,7 @@ button:disabled {
 .editor-form button,
 .connection-card button,
 .flow-card button {
-  min-height: 32px;
+  min-height: 30px;
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-md);
   background: var(--color-canvas);
@@ -391,15 +391,15 @@ button:disabled {
   margin: var(--space-1) 0 0;
   color: var(--color-body);
   font-family: var(--font-code);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .flow-editor {
   width: 100%;
   max-width: none;
-  gap: 12px;
-  margin: 24px 0;
-  padding: 24px;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
 }
 
 .flow-editor label {
@@ -410,25 +410,25 @@ button:disabled {
 .flow-editor select,
 .flow-editor textarea,
 .flow-editor button {
-  min-height: 40px;
-  padding: 8px 10px;
+  min-height: 30px;
+  padding: 6px 8px;
 }
 
 .flow-editor .section-heading,
 .flow-editor .editor-actions {
-  gap: 12px;
+  gap: var(--space-2);
 }
 
 .query-step {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
   margin: 0;
-  padding: var(--space-4);
+  padding: var(--space-3);
 }
 
 .flow-editor .query-step {
-  gap: 12px;
-  padding: 16px;
+  gap: var(--space-2);
+  padding: var(--space-3);
 }
 
 .sql-editor {
@@ -447,7 +447,7 @@ button:disabled {
 .history-detail,
 .run-history > aside {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .run-flow-picker {
@@ -459,7 +459,7 @@ button:disabled {
 }
 
 .run-flow-picker select {
-  min-height: 32px;
+  min-height: 30px;
   padding: 6px 8px;
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-md);
@@ -471,8 +471,8 @@ button:disabled {
 .run-log,
 .history-detail,
 .run-history > aside {
-  margin: var(--space-4) 0;
-  padding: var(--space-4);
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-lg);
   background: var(--color-card);
@@ -498,15 +498,33 @@ button:disabled {
 .run-history {
   display: grid;
   grid-template-columns: minmax(200px, 0.3fr) minmax(0, 1fr);
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 
 .run-history > aside button {
-  min-height: 32px;
+  min-height: 30px;
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-md);
   background: var(--color-canvas);
   color: inherit;
+  padding: 6px 8px;
+}
+
+.editor-form,
+.connection-card,
+.flow-card,
+.connection-settings,
+.flow-settings,
+.run-dashboard,
+.run-history-page,
+.run-flow-picker,
+.run-summary,
+.run-steps,
+.run-log,
+.history-detail,
+.run-history > aside {
+  font-size: 0.8125rem;
+  line-height: 1.4;
 }
 
 .recovery-backdrop {
