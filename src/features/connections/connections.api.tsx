@@ -43,3 +43,11 @@ export function testConnection(id: string): Promise<ConnectionTestResult> {
 export function disableConnection(id: string): Promise<Connection> {
   return invokeCommand("disable_connection", { request: { connectionId: id } });
 }
+
+export function setConnectionEnabled(id: string, enabled: boolean): Promise<Connection> {
+  return invokeCommand("set_connection_enabled", { request: { connectionId: id, enabled } });
+}
+
+export function deleteConnection(id: string): Promise<void> {
+  return invokeCommand("delete_connection", { request: { connectionId: id } });
+}
