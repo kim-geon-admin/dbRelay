@@ -11,6 +11,8 @@ export const DB_RELAY_COMMANDS = [
   "list_flows",
   "save_flow",
   "duplicate_flow",
+  "preview_flow_step",
+  "run_flow_step",
   "start_run",
   "recover_run",
   "list_run_history",
@@ -46,6 +48,39 @@ export type FlowDto = {
   querySteps: Array<{ id: string; selectSql: string; upsertSql: string }>;
   transactionPolicy: "all_or_nothing" | "commit_successes";
   version: number;
+};
+
+export type PreviewOracleDateDto = {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+};
+
+export type PreviewOracleTimestampDto = PreviewOracleDateDto & {
+  microsecond: number;
+  tzHourOffset: number;
+  tzMinuteOffset: number;
+};
+
+export type PreviewBytesDto = { type: "bytes"; base64: string };
+
+export type PreviewCellDto =
+  | null
+  | string
+  | number
+  | boolean
+  | PreviewOracleDateDto
+  | PreviewOracleTimestampDto
+  | PreviewBytesDto
+  | PreviewCellDto[]
+  | { [key: string]: PreviewCellDto };
+
+export type PreviewFlowStepDto = {
+  columns: string[];
+  rows: Array<Record<string, PreviewCellDto>>;
 };
 
 export type RunErrorDto =
@@ -132,6 +167,15 @@ export type CommandRequestMap = {
   list_flows: undefined;
   save_flow: { request: FlowDto };
   duplicate_flow: { request: { flowId: string; duplicateId: string } };
+  preview_flow_step: { request: { sourceConnectionId: string; selectSql: string } };
+  run_flow_step: {
+    request: {
+      sourceConnectionId: string;
+      targetConnectionId: string;
+      selectSql: string;
+      upsertSql: string;
+    };
+  };
   start_run: { request: { flowId: string } };
   recover_run: { request: RecoverRunRequestDto };
   list_run_history: undefined;
@@ -148,6 +192,8 @@ export type CommandResponseMap = {
   list_flows: FlowDto[];
   save_flow: FlowDto;
   duplicate_flow: FlowDto;
+  preview_flow_step: PreviewFlowStepDto;
+  run_flow_step: { affectedRows: number };
   start_run: RunDto;
   recover_run: RunDto;
   list_run_history: HistoryRunDto[];

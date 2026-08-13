@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { HistoryService } from "../application/historyService";
 import { MigrationRunner, MigrationRunnerError } from "../application/migrationRunner";
@@ -79,6 +79,148 @@ describe("DB Relay command handler", () => {
     expect(response[0]).not.toHaveProperty("credentialRef");
   });
 
+  it("accepts exact preview and current-step requests", async () => {
+    // Would fail if either dedicated command was absent, accepted a forged request,
+    // or dispatched a current step through an unrelated run operation.
+    const { handler, services } = fixture();
+    const previewFlowStep = vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      columns: ["ID"],
+      rows: [{ ID: 1 }],
+    });
+    const runFlowStep = vi.spyOn(services.runs, "runFlowStep").mockResolvedValue({ affectedRows: 1 });
+
+    await expect(handler("preview_flow_step", {
+      request: { sourceConnectionId: "source", selectSql: "SELECT id FROM t" },
+    })).resolves.toEqual({ columns: ["ID"], rows: [{ ID: 1 }] });
+    await expect(handler("run_flow_step", {
+      request: {
+        sourceConnectionId: "source",
+        targetConnectionId: "target",
+        selectSql: "SELECT id FROM t",
+        upsertSql: "MERGE INTO target USING dual ON (id = :ID)",
+      },
+    })).resolves.toEqual({ affectedRows: 1 });
+    await expect(handler("preview_flow_step", {
+      request: { sourceConnectionId: "source", selectSql: "SELECT 1", extra: true },
+    } as never)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+
+    expect(previewFlowStep).toHaveBeenCalledWith({
+      sourceConnectionId: "source",
+      selectSql: "SELECT id FROM t",
+    });
+    expect(runFlowStep).toHaveBeenCalledWith({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM t",
+      upsertSql: "MERGE INTO target USING dual ON (id = :ID)",
+    });
+  });
+
+  it("projects preview values to lossless JSON-safe cells", async () => {
+    // Would fail if binary values, structured Oracle temporal values, or nested
+    // JSON-safe preview values crossed IPC in a driver-specific shape.
+    const { handler, services } = fixture();
+    vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      columns: ["DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
+      rows: [{
+        DATE_VALUE: { year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12 },
+        TIMESTAMP_VALUE: {
+          year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12,
+          microsecond: 123_456, tzHourOffset: 9, tzMinuteOffset: 0,
+        },
+        BYTES: new Uint8Array([0, 255]),
+        NESTED: { value: [true, null, "safe"] },
+      } as never],
+    });
+
+    await expect(handler("preview_flow_step", {
+      request: { sourceConnectionId: "source", selectSql: "SELECT value FROM t" },
+    })).resolves.toEqual({
+      columns: ["DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
+      rows: [{
+        DATE_VALUE: { year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12 },
+        TIMESTAMP_VALUE: {
+          year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12,
+          microsecond: 123_456, tzHourOffset: 9, tzMinuteOffset: 0,
+        },
+        BYTES: { type: "bytes", base64: "AP8=" },
+        NESTED: { value: [true, null, "safe"] },
+      }],
+    });
+  });
+
+  it("rejects unsupported preview values without exposing their contents", async () => {
+    // Would fail if an unsupported source value was serialized or its raw value
+    // appeared in a cross-process error.
+    const { handler, services } = fixture();
+    vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      columns: ["SECRET"],
+      rows: [{ SECRET: 42n }],
+    });
+
+    const rejection = handler("preview_flow_step", {
+      request: { sourceConnectionId: "source", selectSql: "SELECT secret FROM t" },
+    });
+
+    await expect(rejection).rejects.toEqual({
+      title: "Request could not be completed",
+      detail: "The request could not be completed.",
+      code: "PREVIEW_VALUE_UNSUPPORTED",
+    });
+    await expect(rejection).rejects.not.toSatisfy((error: unknown) => /secret|42/u.test(JSON.stringify(error)));
+  });
+
+  it("rejects cyclic preview values as unsupported", async () => {
+    // Would fail if recursive projection overflowed or surfaced an internal error
+    // instead of treating a non-JSON-safe source value as unsupported.
+    const { handler, services } = fixture();
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      columns: ["VALUE"],
+      rows: [{ VALUE: cycle } as never],
+    });
+
+    await expect(handler("preview_flow_step", {
+      request: { sourceConnectionId: "source", selectSql: "SELECT value FROM t" },
+    })).rejects.toEqual({
+      title: "Request could not be completed",
+      detail: "The request could not be completed.",
+      code: "PREVIEW_VALUE_UNSUPPORTED",
+    });
+  });
+
+  it("keeps rows and sensitive execution details exclusive to preview responses", async () => {
+    // Would fail if the current-step execution response forwarded target binds,
+    // source rows, or credential material instead of its summary.
+    const { handler, services } = fixture();
+    vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      columns: ["ID"],
+      rows: [{ ID: 1 }],
+    });
+    vi.spyOn(services.runs, "runFlowStep").mockResolvedValue({
+      affectedRows: 1,
+      rows: [{ password: "private" }],
+      binds: { token: "private" },
+      credentialRef: "private",
+      selectSql: "SELECT private",
+    } as never);
+
+    const preview = await handler("preview_flow_step", {
+      request: { sourceConnectionId: "source", selectSql: "SELECT id FROM t" },
+    });
+    const run = await handler("run_flow_step", {
+      request: {
+        sourceConnectionId: "source", targetConnectionId: "target",
+        selectSql: "SELECT id FROM t", upsertSql: "MERGE INTO target USING dual ON (id = :ID)",
+      },
+    });
+
+    expect(preview).toEqual({ columns: ["ID"], rows: [{ ID: 1 }] });
+    expect(run).toEqual({ affectedRows: 1 });
+    expect(JSON.stringify(run)).not.toMatch(/"(?:rows|binds|password|credentialRef|selectSql)"/iu);
+  });
+
   it("enables a disabled connection using only its ID and desired state", async () => {
     const { handler, repository } = fixture();
     repository.saveConnection({ ...connectionProfile(), enabled: false });
@@ -131,6 +273,7 @@ describe("DB Relay command handler", () => {
     const handler = createDbRelayCommandHandler({
       ...services,
       runs: {
+        ...services.runs,
         startRun: async () => {
           throw Object.assign(new MigrationRunnerError("RUN_FAILED", "password=hunter2"), {
             runId: "run-7",
@@ -156,6 +299,7 @@ describe("DB Relay command handler", () => {
     const handler = createDbRelayCommandHandler({
       ...services,
       runs: {
+        ...services.runs,
         startRun: async () => {
           throw new Error("SELECT secret FROM source; binds={token: raw}; rows=[private]");
         },
@@ -179,6 +323,7 @@ describe("DB Relay command handler", () => {
     const knownErrorHandler = createDbRelayCommandHandler({
       ...services,
       runs: {
+        ...services.runs,
         startRun: async () => {
           throw new MigrationRunnerError(
             "RUN_FAILED",
@@ -220,6 +365,7 @@ describe("DB Relay command handler", () => {
     const handler = createDbRelayCommandHandler({
       ...services,
       runs: {
+        ...services.runs,
         startRun: async () => {
           throw Object.assign(
             new MigrationRunnerError("BEGIN PRIVATE_CODE", "safe-looking detail"),
@@ -243,6 +389,7 @@ describe("DB Relay command handler", () => {
     const handler = createDbRelayCommandHandler({
       ...services,
       runs: {
+        ...services.runs,
         startRun: async () => ({
           runId: "run-unsafe",
           policy: "commit_successes",

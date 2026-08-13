@@ -24,6 +24,8 @@ import {
   type HistoryRunDto,
   isDbRelayCommand,
   type RecoverRunRequestDto,
+  type PreviewCellDto,
+  type PreviewFlowStepDto,
   type RunDto,
   type RunErrorDto,
   type RunEventDto,
@@ -46,7 +48,7 @@ type SettingsBoundary = Pick<
 export interface DbRelayServices {
   settings: SettingsBoundary;
   flows: Pick<FlowService, "saveFlow" | "listFlows" | "duplicateFlow">;
-  runs: Pick<MigrationRunner, "startRun" | "recoverRun">;
+  runs: Pick<MigrationRunner, "previewFlowStep" | "runFlowStep" | "startRun" | "recoverRun">;
   history: Pick<HistoryService, "listRunHistory">;
   connectors: Pick<ConnectorRegistry, "forKind">;
 }
@@ -124,6 +126,15 @@ export function createDbRelayCommandHandler(services: DbRelayServices): DbRelayC
         case "duplicate_flow": {
           const input = requestFor(command, request).request;
           return projectFlow(await services.flows.duplicateFlow(input.flowId, input.duplicateId));
+        }
+        case "preview_flow_step": {
+          const input = requestFor(command, request).request;
+          return projectPreview(await services.runs.previewFlowStep(input));
+        }
+        case "run_flow_step": {
+          const input = requestFor(command, request).request;
+          const result = await services.runs.runFlowStep(input);
+          return { affectedRows: result.affectedRows };
         }
         case "start_run":
           return projectRun(await services.runs.startRun(requestFor(command, request).request.flowId));
@@ -264,6 +275,16 @@ function isValidRequestBody(command: DbRelayCommand, body: Record<string, unknow
       return hasOnlyKeys(body, ["flowId", "duplicateId"])
         && typeof body.flowId === "string"
         && typeof body.duplicateId === "string";
+    case "preview_flow_step":
+      return hasOnlyKeys(body, ["sourceConnectionId", "selectSql"])
+        && typeof body.sourceConnectionId === "string"
+        && typeof body.selectSql === "string";
+    case "run_flow_step":
+      return hasOnlyKeys(body, ["sourceConnectionId", "targetConnectionId", "selectSql", "upsertSql"])
+        && typeof body.sourceConnectionId === "string"
+        && typeof body.targetConnectionId === "string"
+        && typeof body.selectSql === "string"
+        && typeof body.upsertSql === "string";
     case "start_run":
       return hasOnlyKeys(body, ["flowId"])
         && typeof body.flowId === "string";
@@ -414,6 +435,68 @@ function projectFlow(flow: Flow): FlowDto {
     transactionPolicy: flow.transactionPolicy,
     version: flow.version,
   };
+}
+
+function projectPreview(preview: {
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+}): PreviewFlowStepDto {
+  return {
+    columns: preview.columns.map((column) => column),
+    rows: preview.rows.map((row) => projectPreviewRow(row)),
+  };
+}
+
+function projectPreviewRow(row: Record<string, unknown>): Record<string, PreviewCellDto> {
+  return Object.fromEntries(Object.entries(row).map(([column, value]) => [
+    column,
+    projectPreviewCell(value),
+  ]));
+}
+
+function projectPreviewCell(
+  value: unknown,
+  ancestors: Set<object> = new Set<object>(),
+): PreviewCellDto {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return value;
+    throw serviceError("PREVIEW_VALUE_UNSUPPORTED", "preview value is unsupported");
+  }
+  if (value instanceof Uint8Array) {
+    return { type: "bytes", base64: Buffer.from(value).toString("base64") };
+  }
+  if (Array.isArray(value)) {
+    return projectPreviewComposite(value, ancestors, () => value.map((nested) =>
+      projectPreviewCell(nested, ancestors)));
+  }
+  if (isPlainRecord(value)) {
+    return projectPreviewComposite(value, ancestors, () => Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [
+        key,
+        projectPreviewCell(nested, ancestors),
+      ]),
+    ));
+  }
+  throw serviceError("PREVIEW_VALUE_UNSUPPORTED", "preview value is unsupported");
+}
+
+function projectPreviewComposite<T extends object>(
+  value: T,
+  ancestors: Set<object>,
+  project: () => PreviewCellDto,
+): PreviewCellDto {
+  if (ancestors.has(value)) {
+    throw serviceError("PREVIEW_VALUE_UNSUPPORTED", "preview value is unsupported");
+  }
+  ancestors.add(value);
+  try {
+    return project();
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function recoveryRequest(request: RecoverRunRequestDto): RecoveryRequest {
@@ -622,6 +705,12 @@ function isSafeErrorCode(code: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function isSafeBoundaryError(

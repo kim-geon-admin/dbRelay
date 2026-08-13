@@ -4,7 +4,25 @@ import { invokeDbRelayCommand, isAllowedCommand } from "./preload";
 describe("isAllowedCommand", () => {
   it("accepts only DB Relay command names", () => {
     expect(isAllowedCommand("list_connections")).toBe(true);
+    expect(isAllowedCommand("preview_flow_step")).toBe(true);
+    expect(isAllowedCommand("run_flow_step")).toBe(true);
     expect(isAllowedCommand("execute_arbitrary_sql")).toBe(false);
+  });
+
+  it("forwards the two typed current-step commands through the allowlist", async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: { columns: ["ID"], rows: [{ ID: 1 }] } })
+      .mockResolvedValueOnce({ ok: true, value: { affectedRows: 1 } });
+
+    await expect(invokeDbRelayCommand(invoke, "preview_flow_step", {
+      request: { sourceConnectionId: "source", selectSql: "SELECT id FROM t" },
+    })).resolves.toEqual({ columns: ["ID"], rows: [{ ID: 1 }] });
+    await expect(invokeDbRelayCommand(invoke, "run_flow_step", {
+      request: {
+        sourceConnectionId: "source", targetConnectionId: "target",
+        selectSql: "SELECT id FROM t", upsertSql: "MERGE INTO target USING dual ON (id = :ID)",
+      },
+    })).resolves.toEqual({ affectedRows: 1 });
   });
 
   it("unwraps a successful main-process response", async () => {

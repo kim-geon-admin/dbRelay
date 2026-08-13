@@ -57,12 +57,33 @@ describe("Electron process boundaries", () => {
       "list_flows",
       "save_flow",
       "duplicate_flow",
+      "preview_flow_step",
+      "run_flow_step",
       "start_run",
       "recover_run",
       "list_run_history",
     ]);
     expect(DB_RELAY_COMMANDS.some((command) => /arbitrary|generic|execute.*sql/iu.test(command)))
       .toBe(false);
+  });
+
+  it("limits source rows to the dedicated preview DTO and projection", () => {
+    const commands = readFileSync(resolve(workspace, "electron/ipc/commands.ts"), "utf8");
+    const handlers = readFileSync(resolve(workspace, "electron/ipc/handlers.ts"), "utf8");
+    const desktop = readFileSync(resolve(workspace, "src/lib/desktop.ts"), "utf8");
+
+    expect(commands).toMatch(/export type PreviewFlowStepDto = \{[\s\S]*?rows:/u);
+    expect(commands).toMatch(/preview_flow_step: PreviewFlowStepDto/u);
+    expect(commands).toMatch(/run_flow_step:\s*\{\s*affectedRows: number\s*\}/u);
+    const runDto = /export type RunDto = \{(?<body>[\s\S]*?)\n\};/u.exec(commands)?.groups?.body ?? "";
+    const historyRunDto = /export type HistoryRunDto = RunDto & \{(?<body>[\s\S]*?)\n\};/u.exec(commands)?.groups?.body ?? "";
+    expect(runDto).not.toMatch(/rows|binds|password|credential|selectSql|upsertSql/iu);
+    expect(historyRunDto).not.toMatch(/rows|binds|password|credential|selectSql|upsertSql/iu);
+    expect(handlers).toMatch(/case "preview_flow_step":[\s\S]*projectPreview/u);
+    expect(handlers).toMatch(/case "run_flow_step":[\s\S]*affectedRows/u);
+    expect(desktop).toMatch(/type PreviewFlowStepDto = \{[\s\S]*?rows:/u);
+    expect(desktop).toMatch(/preview_flow_step: PreviewFlowStepDto/u);
+    expect(desktop).toMatch(/run_flow_step:\s*\{\s*affectedRows: number\s*\}/u);
   });
 
   it("limits renderer connection responses to passwordMask", () => {
