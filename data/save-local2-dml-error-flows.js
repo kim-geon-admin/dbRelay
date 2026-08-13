@@ -34,6 +34,9 @@ const failures = [
   ["missing-bind", "바인드 누락", "UPDATE TGT_USERS SET DISPLAY_NAME = :MISSING_BIND WHERE USER_ID = :USER_ID"],
   ["invalid-date-function", "날짜 함수 오류", "UPDATE TGT_USERS SET REGISTERED_AT = TO_DATE(:EMAIL, 'YYYY-MM-DD') WHERE USER_ID = :USER_ID"],
   ["invalid-insert-column", "INSERT 컬럼 오류", "INSERT INTO TGT_USER_CONTACT_EXPORT (CONTACT_EXPORT_ID, BAD_FIELD) VALUES (:CONTACT_EXPORT_ID, :EMAIL)"],
+  ["not-null-email", "사용자 EMAIL 미입력", "INSERT INTO TGT_USERS (USER_ID, LOGIN_ID, DISPLAY_NAME, EMAIL, USER_STATUS, REGISTERED_AT) VALUES (:USER_ID, :LOGIN_ID, :DISPLAY_NAME, NULL, :USER_STATUS, :REGISTERED_AT)"],
+  ["not-null-city", "주소 CITY 미입력", "INSERT INTO TGT_USER_ADDRESSES (ADDRESS_ID, USER_ID, ADDRESS_TYPE, POSTAL_CODE, CITY, ADDRESS_LINE1, IS_PRIMARY, CREATED_AT) VALUES (:ADDRESS_ID, :USER_ID, :ADDRESS_TYPE, :POSTAL_CODE, NULL, :ADDRESS_LINE1, :IS_PRIMARY, :CREATED_AT)"],
+  ["not-null-export-login", "내보내기 LOGIN_ID 미입력", "INSERT INTO TGT_USER_CONTACT_EXPORT (CONTACT_EXPORT_ID, USER_ID, ADDRESS_ID, LOGIN_ID, EMAIL, ADDRESS_TYPE, CITY, POSTAL_CODE) VALUES (:CONTACT_EXPORT_ID, :USER_ID, :ADDRESS_ID, NULL, :EMAIL, :ADDRESS_TYPE, :CITY, :POSTAL_CODE)"],
 ];
 function sourceSql(index) {
   return `SELECT u.USER_ID AS USER_ID, u.LOGIN_ID AS LOGIN_ID, u.DISPLAY_NAME AS DISPLAY_NAME, u.EMAIL AS EMAIL, u.USER_STATUS AS USER_STATUS, u.REGISTERED_AT AS REGISTERED_AT, a.ADDRESS_ID AS ADDRESS_ID, a.ADDRESS_TYPE AS ADDRESS_TYPE, a.POSTAL_CODE AS POSTAL_CODE, a.CITY AS CITY, a.ADDRESS_LINE1 AS ADDRESS_LINE1, a.IS_PRIMARY AS IS_PRIMARY, a.CREATED_AT AS CREATED_AT, e.CONTACT_EXPORT_ID AS CONTACT_EXPORT_ID FROM SRC_USERS u JOIN SRC_USER_ADDRESSES a ON a.USER_ID = u.USER_ID JOIN SRC_USER_CONTACT_EXPORT e ON e.USER_ID = u.USER_ID AND e.ADDRESS_ID = a.ADDRESS_ID WHERE u.USER_ID BETWEEN 1001 AND 1030 AND MOD(u.USER_ID, 30) = ${index % 2}`;
@@ -57,6 +60,6 @@ try {
   const flowCount = db.prepare("SELECT COUNT(*) AS count FROM flows WHERE id LIKE 'local2-dml-error-%'").get().count;
   const stepCount = db.prepare("SELECT COUNT(*) AS count FROM query_steps WHERE flow_id LIKE 'local2-dml-error-%'").get().count;
   const policies = db.prepare("SELECT transaction_policy, COUNT(*) AS count FROM flows WHERE id LIKE 'local2-dml-error-%' GROUP BY transaction_policy ORDER BY transaction_policy").all();
-  if (flowCount !== 30 || stepCount !== 90) throw new Error("storage verification failed");
+  if (flowCount !== 33 || stepCount !== 99) throw new Error("storage verification failed");
   console.log(JSON.stringify({ flowCount, stepCount, policies }));
 } finally { db.close(); }
