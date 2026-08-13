@@ -102,6 +102,30 @@ describe("DB Relay command handler", () => {
     expect(repository.loadFlow("daily")).toBeDefined();
   });
 
+  it("rejects set_connection_enabled requests with unexpected extra properties", async () => {
+    const { handler } = fixture();
+
+    await expect(handler("set_connection_enabled", {
+      request: { connectionId: "production", enabled: true, displayName: "forged" },
+    } as never)).rejects.toEqual({
+      title: "Request could not be completed",
+      detail: "request payload is invalid",
+      code: "INVALID_REQUEST",
+    });
+  });
+
+  it("rejects delete_connection requests with unexpected extra properties", async () => {
+    const { handler } = fixture();
+
+    await expect(handler("delete_connection", {
+      request: { connectionId: "production", enabled: false },
+    } as never)).rejects.toEqual({
+      title: "Request could not be completed",
+      detail: "request payload is invalid",
+      code: "INVALID_REQUEST",
+    });
+  });
+
   it("projects fixed structured errors with recovery context", async () => {
     const { services } = fixture();
     const handler = createDbRelayCommandHandler({
