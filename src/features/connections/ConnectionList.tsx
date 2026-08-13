@@ -37,12 +37,26 @@ export function ConnectionList() {
   };
 
   const setEnabled = async (connection: Connection, enabled: boolean) => {
+    const successNotice = `${connection.displayName} ${enabled ? "enabled" : "disabled"}.`;
+    const refreshFailedNotice = `${connection.displayName} ${enabled ? "enabled" : "disabled"}, but the list could not be refreshed.`;
+
     try {
-      await setConnectionEnabled(connection.id, enabled);
-      await refresh();
-      setNotice(`${connection.displayName} ${enabled ? "enabled" : "disabled"}.`);
+      const updatedConnection = await setConnectionEnabled(connection.id, enabled);
+      setConnections((currentConnections) =>
+        currentConnections.map((currentConnection) =>
+          currentConnection.id === updatedConnection.id ? updatedConnection : currentConnection,
+        ),
+      );
     } catch {
       setNotice("Connection availability could not be updated.");
+      return;
+    }
+
+    try {
+      await refresh();
+      setNotice(successNotice);
+    } catch {
+      setNotice(refreshFailedNotice);
     }
   };
 
@@ -53,8 +67,9 @@ export function ConnectionList() {
 
     try {
       await deleteConnection(connection.id);
-      await refresh();
-      setNotice(`${connection.displayName} deleted.`);
+      setConnections((currentConnections) =>
+        currentConnections.filter((currentConnection) => currentConnection.id !== connection.id),
+      );
     } catch (error) {
       const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
 
@@ -64,6 +79,14 @@ export function ConnectionList() {
       }
 
       setNotice(`${connection.displayName} could not be deleted.`);
+      return;
+    }
+
+    try {
+      await refresh();
+      setNotice(`${connection.displayName} deleted.`);
+    } catch {
+      setNotice(`${connection.displayName} deleted, but the list could not be refreshed.`);
     }
   };
 
