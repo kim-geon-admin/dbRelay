@@ -320,7 +320,9 @@ function losslessOracleNumber(value: string): number | bigint | string | undefin
   if (Number.isFinite(converted)) {
     const convertedCanonical = canonicalDecimal(converted.toString());
     if (sourceCanonical === convertedCanonical) {
-      return converted;
+      return sourceCanonical.includes(".") || Number.isSafeInteger(converted)
+        ? converted
+        : BigInt(sourceCanonical);
     }
   }
   return sourceCanonical.includes(".") ? sourceCanonical : BigInt(sourceCanonical);
