@@ -65,7 +65,7 @@ it("shows a commit-successes policy in Korean", async () => {
   listFlows.mockResolvedValueOnce([{ ...savedFlow, transactionPolicy: "commit_successes" as const }]);
   render(<FlowLibrary />);
 
-  expect(await screen.findByText("성공 단계 커밋")).toBeVisible();
+  expect(await screen.findByText("성공한 부분까지 커밋")).toBeVisible();
   expect(screen.queryByText("Commit successes")).not.toBeInTheDocument();
 });
 

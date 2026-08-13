@@ -60,5 +60,5 @@ it("uses Korean labels for transaction policies", () => {
   render(<FlowEditor connections={[]} onSave={vi.fn()} />);
 
   expect(screen.getByRole("option", { name: "전체 롤백" })).toHaveValue("all_or_nothing");
-  expect(screen.getByRole("option", { name: "성공 단계 커밋" })).toHaveValue("commit_successes");
+  expect(screen.getByRole("option", { name: "성공한 부분까지 커밋" })).toHaveValue("commit_successes");
 });
