@@ -63,6 +63,84 @@ export class MigrationRunner {
     private readonly credentials?: CredentialResolver,
   ) {}
 
+  async previewFlowStep(input: {
+    sourceConnectionId: string;
+    selectSql: string;
+  }): Promise<{ columns: string[]; rows: NamedRow[] }> {
+    const sourceProfile = this.loadRunnableProfile(input.sourceConnectionId, "source");
+    if (sourceProfile.kind !== this.connector.kind) {
+      throw new MigrationRunnerError("CONNECTOR_KIND_MISMATCH", "connector kind does not match");
+    }
+    try {
+      validateSourceStatement(input.selectSql);
+    } catch {
+      throw new MigrationRunnerError(
+        "STATEMENT_INVALID",
+        "source SQL must follow the migration statement policy",
+      );
+    }
+
+    let source: DatabaseSession | undefined;
+    try {
+      const sourceSecret = await this.resolveCredential(sourceProfile);
+      source = await this.connector.open(sourceProfile, sourceSecret);
+      const rowSet = await source.query(input.selectSql);
+      return { columns: rowSet.columns, rows: rowSet.rows };
+    } catch (error) {
+      throw asMigrationRunnerError(error);
+    } finally {
+      await closeSessions(source);
+    }
+  }
+
+  async runFlowStep(input: {
+    sourceConnectionId: string;
+    targetConnectionId: string;
+    selectSql: string;
+    upsertSql: string;
+  }): Promise<{ affectedRows: number }> {
+    if (input.sourceConnectionId === input.targetConnectionId) {
+      throw new MigrationRunnerError(
+        "CONNECTIONS_NOT_DISTINCT",
+        "source and target connections must be different",
+      );
+    }
+    const sourceProfile = this.loadRunnableProfile(input.sourceConnectionId, "source");
+    const targetProfile = this.loadRunnableProfile(input.targetConnectionId, "target");
+    if (sourceProfile.kind !== this.connector.kind || targetProfile.kind !== this.connector.kind) {
+      throw new MigrationRunnerError("CONNECTOR_KIND_MISMATCH", "connector kind does not match");
+    }
+
+    const step: QueryStep = {
+      id: "current-flow-step",
+      selectSql: input.selectSql,
+      upsertSql: input.upsertSql,
+    };
+    let source: DatabaseSession | undefined;
+    let target: DatabaseSession | undefined;
+    let began = false;
+    try {
+      const sourceSecret = await this.resolveCredential(sourceProfile);
+      const targetSecret = await this.resolveCredential(targetProfile);
+      source = await this.connector.open(sourceProfile, sourceSecret);
+      target = await this.connector.open(targetProfile, targetSecret);
+      const batch = await preflightStep(source, targetProfile, step);
+      await target.begin();
+      began = true;
+      const affectedRows = await target.executeNamed(step.upsertSql, batch);
+      await target.commit();
+      return { affectedRows };
+    } catch (error) {
+      if (began && target !== undefined) {
+        const startedTarget = target;
+        await Promise.resolve().then(() => startedTarget.rollback()).catch(() => undefined);
+      }
+      throw asMigrationRunnerError(error);
+    } finally {
+      await closeSessions(target, source);
+    }
+  }
+
   async startRun(flowId: string): Promise<RunDto> {
     const flow = this.flows.loadFlow(flowId);
     if (flow === undefined) {
@@ -588,6 +666,22 @@ export class MigrationRunner {
       return legacy;
     }
   }
+
+  private loadRunnableProfile(connectionId: string, role: "source" | "target"): ConnectionProfile {
+    let profile: ConnectionProfile | undefined;
+    try {
+      profile = this.flows.loadRunnableConnection(connectionId);
+    } catch (error) {
+      throw asMigrationRunnerError(error);
+    }
+    if (profile === undefined) {
+      throw new MigrationRunnerError(
+        "CONNECTION_NOT_FOUND",
+        `${role} connection was not found`,
+      );
+    }
+    return profile;
+  }
 }
 
 async function preflightStep(
@@ -724,6 +818,28 @@ function asRunError(error: unknown): RunError {
 function portRunError(error: unknown): RunError {
   const detail = errorDetail(error);
   return RunError.connectorWithRetryable(detail.code, detail.message, detail.retryable);
+}
+
+function asMigrationRunnerError(error: unknown): MigrationRunnerError {
+  if (error instanceof MigrationRunnerError) {
+    return error;
+  }
+  if (error instanceof RunError) {
+    const runError = error.toJSON();
+    if (runError.type === "connector") {
+      return new MigrationRunnerError(
+        runError.detail.code,
+        "database operation failed; inspect the database server audit log",
+        error.retryable(),
+      );
+    }
+  }
+  const detail = errorDetail(error);
+  return new MigrationRunnerError(
+    detail.code,
+    "database operation failed; inspect the database server audit log",
+    detail.retryable,
+  );
 }
 
 function errorDetail(error: unknown): { code: string; message: string; retryable: boolean } {

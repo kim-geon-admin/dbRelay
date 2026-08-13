@@ -33,6 +33,71 @@ describe("MigrationRunner", () => {
     return value;
   }
 
+  it("returns all source preview rows without creating history", async () => {
+    // Would fail if preview persisted a run, opened a target session, or projected only part of the row set.
+    const test = harness("all_or_nothing").sourceRowsAt(0, {
+      columns: ["ID"],
+      unsupportedBindColumns: [],
+      rows: [{ ID: 1 }, { ID: 2 }],
+    });
+
+    const result = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT id FROM customers",
+    });
+
+    expect(result).toEqual({ columns: ["ID"], rows: [{ ID: 1 }, { ID: 2 }] });
+    expect(test.repository.listRuns()).toEqual([]);
+    expect(test.connector.targetOperations).toEqual([]);
+    expect(test.connector.closedProfiles).toEqual(["source"]);
+  });
+
+  it("rejects invalid preview Source SQL", async () => {
+    // Would fail if preview accepted a non-read statement before opening the source session.
+    const test = harness("all_or_nothing");
+
+    await expect(test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "DELETE FROM customers",
+    })).rejects.toMatchObject({ code: "STATEMENT_INVALID" });
+
+    expect(test.connector.openedProfiles).toEqual([]);
+  });
+
+  it("commits the unsaved current step without creating a run", async () => {
+    // Would fail if immediate execution persisted history or did not use exactly one target transaction.
+    const test = harness("all_or_nothing");
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: "MERGE INTO customer USING dual ON (id = :ID)",
+    })).resolves.toEqual({ affectedRows: 1 });
+
+    expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "commit"]);
+    expect(test.repository.listRuns()).toEqual([]);
+    expect(test.connector.closedProfiles).toEqual(["target", "source"]);
+  });
+
+  it("rolls back the current step and retains the Oracle code", async () => {
+    // Would fail if post-begin failures skipped rollback or converted the native error code.
+    const test = harness("all_or_nothing").targetFailsAt(
+      0,
+      new ConnectorError("ORA-00001", "private"),
+    );
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: "MERGE INTO customer USING dual ON (id = :ID)",
+    })).rejects.toMatchObject({ code: "ORA-00001" });
+
+    expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "rollback"]);
+    expect(test.repository.listRuns()).toEqual([]);
+  });
+
   it("rolls back the target when the second all-or-nothing step fails", async () => {
     // Would fail if the runner committed partial work, opened the transaction
     // before all preflight mapping, or leaked either connector session.
