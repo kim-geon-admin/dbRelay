@@ -132,18 +132,20 @@ describe("OracleConnector", () => {
     await session.close();
   });
 
-  it("fetches Oracle NUMBER as text and rejects values that cannot round-trip through JavaScript", async () => {
+  it("keeps every valid Oracle NUMBER in source rows without lossy JavaScript conversion", async () => {
     const { connector, connection, driver } = fixture({
       execute: vi.fn().mockResolvedValue({
         metaData: [
           { name: "SAFE_ID", dbType: "DB_TYPE_NUMBER" },
           { name: "AMOUNT", dbType: "DB_TYPE_NUMBER" },
           { name: "UNSAFE_ID", dbType: "DB_TYPE_NUMBER" },
+          { name: "PRECISE_AMOUNT", dbType: "DB_TYPE_NUMBER" },
         ],
         rows: [{
           SAFE_ID: "7",
           AMOUNT: "123.45",
           UNSAFE_ID: "9007199254740993",
+          PRECISE_AMOUNT: "0.12345678901234567890123456789012345678",
         }],
       }),
     });
@@ -156,9 +158,14 @@ describe("OracleConnector", () => {
       type: driver.DB_TYPE_VARCHAR,
     });
     expect(result).toEqual({
-      columns: ["SAFE_ID", "AMOUNT", "UNSAFE_ID"],
-      unsupportedBindColumns: ["UNSAFE_ID"],
-      rows: [{ SAFE_ID: 7, AMOUNT: 123.45 }],
+      columns: ["SAFE_ID", "AMOUNT", "UNSAFE_ID", "PRECISE_AMOUNT"],
+      unsupportedBindColumns: ["UNSAFE_ID", "PRECISE_AMOUNT"],
+      rows: [{
+        SAFE_ID: 7,
+        AMOUNT: 123.45,
+        UNSAFE_ID: 9_007_199_254_740_993n,
+        PRECISE_AMOUNT: "0.12345678901234567890123456789012345678",
+      }],
     });
     await session.close();
   });

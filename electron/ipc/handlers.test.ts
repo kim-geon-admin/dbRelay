@@ -121,8 +121,9 @@ describe("DB Relay command handler", () => {
     // JSON-safe preview values crossed IPC in a driver-specific shape.
     const { handler, services } = fixture();
     vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
-      columns: ["DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
+      columns: ["BIG_ID", "DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
       rows: [{
+        BIG_ID: 9_007_199_254_740_993n,
         DATE_VALUE: { year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12 },
         TIMESTAMP_VALUE: {
           year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12,
@@ -136,8 +137,9 @@ describe("DB Relay command handler", () => {
     await expect(handler("preview_flow_step", {
       request: { sourceConnectionId: "source", selectSql: "SELECT value FROM t" },
     })).resolves.toEqual({
-      columns: ["DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
+      columns: ["BIG_ID", "DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
       rows: [{
+        BIG_ID: { type: "bigint", decimal: "9007199254740993" },
         DATE_VALUE: { year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12 },
         TIMESTAMP_VALUE: {
           year: 2026, month: 8, day: 13, hour: 10, minute: 11, second: 12,
@@ -155,7 +157,7 @@ describe("DB Relay command handler", () => {
     const { handler, services } = fixture();
     vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
       columns: ["SECRET"],
-      rows: [{ SECRET: 42n }],
+      rows: [{ SECRET: Symbol("private-preview-value") } as never],
     });
 
     const rejection = handler("preview_flow_step", {

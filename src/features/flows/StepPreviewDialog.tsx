@@ -1,4 +1,5 @@
-import type { PreviewBytesDto, PreviewCellDto, PreviewFlowStepDto } from "../../lib/desktop";
+import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import type { PreviewBigIntDto, PreviewBytesDto, PreviewCellDto, PreviewFlowStepDto } from "../../lib/desktop";
 
 type StepPreviewDialogProps = {
   preview: PreviewFlowStepDto;
@@ -22,6 +23,11 @@ function isBytes(value: Exclude<PreviewCellDto, null>): value is PreviewBytesDto
     && "base64" in value && typeof value.base64 === "string";
 }
 
+function isBigInt(value: Exclude<PreviewCellDto, null>): value is PreviewBigIntDto {
+  return typeof value === "object" && !Array.isArray(value) && "type" in value && value.type === "bigint"
+    && "decimal" in value && typeof value.decimal === "string";
+}
+
 function byteLength(base64: string) {
   const normalized = base64.replace(/\s/g, "");
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(normalized)) return undefined;
@@ -32,6 +38,7 @@ function previewCellText(value: PreviewCellDto | undefined): string {
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
   if (Array.isArray(value)) return JSON.stringify(value);
+  if (isBigInt(value)) return value.decimal;
   if (isBytes(value)) {
     const length = byteLength(value.base64);
     return length === undefined ? "bytes" : `${length} bytes`;
@@ -46,8 +53,43 @@ function previewCellText(value: PreviewCellDto | undefined): string {
 }
 
 export function StepPreviewDialog({ preview, onClose }: StepPreviewDialogProps) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialogRef.current?.querySelector<HTMLElement>("button:not([disabled])")?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (restoreFocusRef.current?.isConnected) restoreFocusRef.current.focus();
+    };
+  }, []);
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+    ) ?? []);
+    if (focusable.length === 0) return;
+    const current = focusable.indexOf(document.activeElement as HTMLElement);
+    const next = current < 0
+      ? (event.shiftKey ? focusable[focusable.length - 1] : focusable[0])
+      : focusable[(current + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length];
+    event.preventDefault();
+    next?.focus();
+  };
+
   return <div className="step-preview-backdrop" role="presentation">
-    <section className="step-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="step-preview-title">
+    <section ref={dialogRef} className="step-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="step-preview-title" onKeyDown={handleKeyDown}>
       <div className="step-preview-dialog__header">
         <h2 id="step-preview-title">미리보기</h2>
         <button type="button" onClick={onClose}>닫기</button>

@@ -16,8 +16,9 @@ export type PreviewOracleTimestampDto = PreviewOracleDateDto & {
   microsecond: number; tzHourOffset: number; tzMinuteOffset: number;
 };
 export type PreviewBytesDto = { type: "bytes"; base64: string };
+export type PreviewBigIntDto = { type: "bigint"; decimal: string };
 export type PreviewCellDto = null | string | number | boolean | PreviewOracleDateDto
-  | PreviewOracleTimestampDto | PreviewBytesDto | PreviewCellDto[]
+  | PreviewOracleTimestampDto | PreviewBytesDto | PreviewBigIntDto | PreviewCellDto[]
   | { [key: string]: PreviewCellDto };
 export type PreviewFlowStepDto = {
   columns: string[]; rows: Array<Record<string, PreviewCellDto>>;

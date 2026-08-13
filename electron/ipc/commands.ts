@@ -66,6 +66,7 @@ export type PreviewOracleTimestampDto = PreviewOracleDateDto & {
 };
 
 export type PreviewBytesDto = { type: "bytes"; base64: string };
+export type PreviewBigIntDto = { type: "bigint"; decimal: string };
 
 export type PreviewCellDto =
   | null
@@ -75,6 +76,7 @@ export type PreviewCellDto =
   | PreviewOracleDateDto
   | PreviewOracleTimestampDto
   | PreviewBytesDto
+  | PreviewBigIntDto
   | PreviewCellDto[]
   | { [key: string]: PreviewCellDto };
 

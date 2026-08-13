@@ -124,32 +124,36 @@ class OracleSession implements DatabaseSession {
           : undefined,
       });
       const metadata = result.metaData ?? [];
-      const unsupported = new Set(metadata
+      const omittedColumns = new Set(metadata
         .filter((column) => !isSupportedColumnType(this.driver, column))
         .map((column) => column.name));
+      const unsupportedBindColumns = new Set(omittedColumns);
       const sourceRows = (result.rows ?? [])
         .map((row) => isRecord(row) ? row : Object.create(null) as Record<string, unknown>);
       for (const column of metadata) {
-        if (unsupported.has(column.name)) {
+        if (omittedColumns.has(column.name)) {
           continue;
         }
-        const hasUnrepresentableValue = sourceRows.some((row) => {
-          const sourceValue = row[column.name];
-          return sourceValue !== undefined
-            && convertQueryValue(sourceValue, column.dbType, this.driver) === undefined;
-        });
+        const convertedValues = sourceRows
+          .filter((row) => row[column.name] !== undefined)
+          .map((row) => convertQueryValue(row[column.name], column.dbType, this.driver));
+        const hasUnrepresentableValue = convertedValues.some((value) => value === undefined);
         if (hasUnrepresentableValue) {
-          unsupported.add(column.name);
+          omittedColumns.add(column.name);
+          unsupportedBindColumns.add(column.name);
+        } else if (column.dbType === this.driver.DB_TYPE_NUMBER
+          && convertedValues.some((value) => typeof value === "bigint" || typeof value === "string")) {
+          unsupportedBindColumns.add(column.name);
         }
       }
-      const unsupportedBindColumns = metadata
-        .filter((column) => unsupported.has(column.name))
+      const orderedUnsupportedBindColumns = metadata
+        .filter((column) => unsupportedBindColumns.has(column.name))
         .map((column) => column.name);
       const rows = sourceRows.map((driverRow) =>
-        convertRow(driverRow, metadata, unsupported, this.driver));
+        convertRow(driverRow, metadata, omittedColumns, this.driver));
       return {
         columns: metadata.map((column) => column.name),
-        unsupportedBindColumns,
+        unsupportedBindColumns: orderedUnsupportedBindColumns,
         rows,
       };
     } catch (error) {
@@ -307,16 +311,19 @@ function convertQueryValue(
   return undefined;
 }
 
-function losslessOracleNumber(value: string): number | undefined {
-  const converted = Number(value);
-  if (!Number.isFinite(converted)) {
+function losslessOracleNumber(value: string): number | bigint | string | undefined {
+  const sourceCanonical = canonicalDecimal(value);
+  if (sourceCanonical === undefined) {
     return undefined;
   }
-  const sourceCanonical = canonicalDecimal(value);
-  const convertedCanonical = canonicalDecimal(converted.toString());
-  return sourceCanonical !== undefined && sourceCanonical === convertedCanonical
-    ? converted
-    : undefined;
+  const converted = Number(value);
+  if (Number.isFinite(converted)) {
+    const convertedCanonical = canonicalDecimal(converted.toString());
+    if (sourceCanonical === convertedCanonical) {
+      return converted;
+    }
+  }
+  return sourceCanonical.includes(".") ? sourceCanonical : BigInt(sourceCanonical);
 }
 
 function canonicalDecimal(value: string): string | undefined {

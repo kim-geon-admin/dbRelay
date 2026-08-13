@@ -57,17 +57,17 @@ test("shows an editable update example when the operation changes to update", ()
   expect(screen.getByRole("textbox", { name: "Target SQL for step 1" })).not.toBeDisabled();
 });
 
-test("highlights SQL keywords without rendering a line-number gutter", () => {
+test("edits Source and Target SQL through self-contained native textareas", () => {
   render(<StatefulStepEditor initialStep={{
     id: "step-1",
     selectSql: "SELECT id\nFROM customers\nWHERE id = :id",
     upsertSql: "INSERT INTO customers (id)\nVALUES (:id)",
   }} />);
 
+  expect(screen.getByRole("textbox", { name: "Source SQL for step 1" })).toHaveClass("sql-editor");
+  expect(screen.getByRole("textbox", { name: "Target SQL for step 1" })).toHaveClass("sql-editor");
   expect(screen.queryByTestId("sql-editor-line-numbers")).not.toBeInTheDocument();
-  const keyword = screen.getAllByTestId("sql-editor-highlight")[0].querySelector(".sql-token--keyword");
-  expect(keyword).toHaveTextContent("SELECT");
-  expect(keyword).toHaveClass("sql-token--keyword");
+  expect(screen.queryByTestId("sql-editor-highlight")).not.toBeInTheDocument();
 });
 
 test("previews the current source SQL and clears the parent preview state when closed", async () => {

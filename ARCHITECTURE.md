@@ -23,7 +23,7 @@ React renderer -> context-isolated preload -> typed IPC handlers -> application 
 
 Current connection profiles store their password as plaintext in the local SQLite database; legacy keyring-backed profiles remain readable. The database file is therefore sensitive. IPC connection responses expose only an asterisk mask matching the saved password's length, never the raw plaintext field or credential reference. Handlers never return passwords, SQL text, bind values, source rows, or execution credentials through run history. Run-history persistence stores a safe recovery binding (flow ID/version, connection IDs, and non-secret configuration fingerprints), then reloads and verifies the live flow/profile before recovery rather than serializing the executable flow or credentials.
 
-Preview-only source-row handling: `preview_flow_step` is the sole transient source-row exception. Source rows never enter logs, SQLite, history, or other DTOs, and closing preview clears renderer state. Generic SQL remains prohibited; passwords, credentials, and target bind values remain excluded from renderer and history surfaces.
+Preview-only source-row handling: `preview_flow_step` is the sole transient source-row exception. Source rows never enter logs, SQLite, history, or other DTOs. The preview response lives only in renderer memory and is discarded when the modal closes. Generic SQL remains prohibited; passwords, credentials, and target bind values remain excluded from renderer and history surfaces.
 
 The Oracle connector maps `DATE` and timezone-free `TIMESTAMP` into structured domain values and uses node-oracledb typed `executeMany` binds. Capability preflight rejects ambiguous textual timestamps and timestamps with timezone offsets before target `begin`.
 

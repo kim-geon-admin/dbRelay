@@ -99,12 +99,12 @@ describe("Electron process boundaries", () => {
     const agents = readFileSync(resolve(workspace, "AGENTS.md"), "utf8");
     const architecture = readFileSync(resolve(workspace, "ARCHITECTURE.md"), "utf8");
     for (const document of [agents, architecture]) {
-      expect(document).toMatch(/preview_flow_step[^\n]*sole transient source-row exception/iu);
-      expect(document).toMatch(/source rows never enter logs, SQLite, history, or other DTOs/iu);
-      expect(document).toMatch(/closing preview clears renderer state/iu);
-      expect(document).toMatch(/generic SQL/iu);
-      expect(document).toMatch(/passwords|credentials/iu);
-      expect(document).toMatch(/target bind value/iu);
+      const previewRules = /Preview-only source-row handling:[^\n]*/iu.exec(document)?.[0] ?? "";
+      expect(previewRules).toMatch(/preview_flow_step.*sole transient source-row exception/iu);
+      expect(previewRules).toMatch(/source rows never enter logs, SQLite, history, or other DTOs/iu);
+      expect(previewRules).toMatch(/response.*renderer memory.*discarded.*modal closes/iu);
+      expect(previewRules).toMatch(/generic SQL.*prohibited/iu);
+      expect(previewRules).toMatch(/passwords.*credentials.*target bind values.*excluded/iu);
     }
   });
 });

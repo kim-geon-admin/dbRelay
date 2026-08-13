@@ -120,11 +120,13 @@ export class MigrationRunner {
     let target: DatabaseSession | undefined;
     let began = false;
     try {
+      validateStepPolicy(targetProfile, step);
       const sourceSecret = await this.resolveCredential(sourceProfile);
       const targetSecret = await this.resolveCredential(targetProfile);
       source = await this.connector.open(sourceProfile, sourceSecret);
       target = await this.connector.open(targetProfile, targetSecret);
-      const batch = await preflightStep(source, targetProfile, step);
+      const batch = await prepareStepBatch(source, step);
+      validateTargetBatch(batch);
       await target.begin();
       began = true;
       const affectedRows = await target.executeNamed(step.upsertSql, batch);

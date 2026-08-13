@@ -4,7 +4,6 @@ import { previewFlowStep, runFlowStep } from "./flows.api";
 import { StepPreviewDialog } from "./StepPreviewDialog";
 import type { QueryOperation, QueryStep, StepPreview } from "./flows.types";
 import { generateTargetSql, targetOperationForSql, type TargetOperation } from "./sqlGeneration";
-import { SqlEditor } from "./SqlEditor";
 
 type QueryStepEditorProps = {
   step: QueryStep;
@@ -94,8 +93,8 @@ export function QueryStepEditor({ step, position, total, sourceConnectionId, tar
     <legend>Step {position + 1}</legend>
     <div className="editor-actions"><button type="button" onClick={() => onMove(-1)} disabled={position === 0} aria-label={`Move step ${position + 1} up`}>Move up</button><button type="button" onClick={() => onMove(1)} disabled={position === total - 1} aria-label={`Move step ${position + 1} down`}>Move down</button><button type="button" onClick={onDelete} disabled={total === 1}>Delete step</button></div>
     <label>Operation<select aria-label={`Operation for step ${position + 1}`} value={operation} onChange={(event) => regenerateTargetSql(event.target.value as TargetOperation, step.selectSql)}><option value="insert">Insert</option><option value="update">Update</option></select></label>
-    <label>Source SQL<SqlEditor ariaLabel={`Source SQL for step ${position + 1}`} value={step.selectSql} onChange={(value) => regenerateTargetSql(operation, value)} /></label>
-    <label>Target SQL<SqlEditor ariaLabel={`Target SQL for step ${position + 1}`} value={step.upsertSql} onChange={(value) => onChange({ ...step, operation, upsertSql: value })} /></label>
+    <label>Source SQL<textarea className="sql-editor" aria-label={`Source SQL for step ${position + 1}`} value={step.selectSql} onChange={(event) => regenerateTargetSql(operation, event.target.value)} /></label>
+    <label>Target SQL<textarea className="sql-editor" aria-label={`Target SQL for step ${position + 1}`} value={step.upsertSql} onChange={(event) => onChange({ ...step, operation, upsertSql: event.target.value })} /></label>
     <div className="editor-actions query-step__operation-actions"><button type="button" onClick={() => void openPreview()} disabled={!canPreview}>{pendingAction === "preview" ? "미리보기 중..." : "미리보기"}</button><button type="button" onClick={() => void runStep()} disabled={!canRun}>{pendingAction === "run" ? "Running..." : "Run"}</button></div>
     {operation === "insert" ? <p className="field-hint">Target SQL is generated from a simple single-table Source SQL query and can be edited.</p> : <p className="field-hint">생성된 WHERE 절을 검토하고, 필요한 경우 대상 테이블의 기본 키로 대체하십시오</p>}
     <p className="field-hint">Target binds: {binds.length ? binds.join(", ") : "None"}</p>

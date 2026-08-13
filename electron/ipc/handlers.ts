@@ -465,6 +465,9 @@ function projectPreviewCell(
     if (Number.isFinite(value)) return value;
     throw serviceError("PREVIEW_VALUE_UNSUPPORTED", "preview value is unsupported");
   }
+  if (typeof value === "bigint") {
+    return { type: "bigint", decimal: value.toString() };
+  }
   if (value instanceof Uint8Array) {
     return { type: "bytes", base64: Buffer.from(value).toString("base64") };
   }

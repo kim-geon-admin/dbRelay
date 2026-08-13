@@ -98,6 +98,32 @@ describe("MigrationRunner", () => {
     expect(test.repository.listRuns()).toEqual([]);
   });
 
+  it.each([
+    {
+      label: "Source SQL",
+      selectSql: "DELETE FROM customer",
+      upsertSql: "MERGE INTO customer USING dual ON (id = :ID)",
+    },
+    {
+      label: "Target SQL",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: "SELECT id FROM customer",
+    },
+  ])("rejects invalid $label before opening database sessions", async ({ selectSql, upsertSql }) => {
+    const test = harness("all_or_nothing");
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql,
+      upsertSql,
+    })).rejects.toMatchObject({ code: "STATEMENT_INVALID" });
+
+    expect(test.connector.openedProfiles).toEqual([]);
+    expect(test.connector.sourceQueries).toEqual([]);
+    expect(test.connector.targetTransactions()).toEqual([]);
+  });
+
   it("rolls back the target when the second all-or-nothing step fails", async () => {
     // Would fail if the runner committed partial work, opened the transaction
     // before all preflight mapping, or leaked either connector session.
