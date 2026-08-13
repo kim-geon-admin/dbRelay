@@ -1,4 +1,5 @@
 import type { Connection } from "../connections/connections.types";
+import type { PreviewFlowStepDto } from "../../lib/desktop";
 
 export type TransactionPolicy = "all_or_nothing" | "commit_successes";
 
@@ -9,6 +10,10 @@ export function transactionPolicyLabel(policy: TransactionPolicy): string {
 export type QueryOperation = "insert" | "update";
 
 export type QueryStep = { id: string; selectSql: string; upsertSql: string; operation?: QueryOperation };
+
+export type PreviewFlowStepInput = { sourceConnectionId: string; selectSql: string };
+export type RunFlowStepInput = PreviewFlowStepInput & { targetConnectionId: string; upsertSql: string };
+export type StepPreview = PreviewFlowStepDto;
 
 export type Flow = {
   id: string;

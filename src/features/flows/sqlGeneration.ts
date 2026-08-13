@@ -25,7 +25,7 @@ export function generateTargetSql(operation: TargetOperation, sourceSql: string)
   const assignments = (updatableColumns.length ? updatableColumns : [key])
     .map((column) => `  ${column} = :${column}`)
     .join(",\n");
-  return `-- Review the WHERE clause and use the target table primary key.\nUPDATE ${source.table}\nSET\n${assignments}\nWHERE ${key} = :${key}`;
+  return `-- 생성된 WHERE 절을 검토하고, 필요한 경우 대상 테이블의 기본 키로 대체하십시오\nUPDATE ${source.table}\nSET\n${assignments}\nWHERE ${key} = :${key}`;
 }
 
 function parseSimpleSelect(sql: string): SourceShape | undefined {
