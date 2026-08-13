@@ -94,6 +94,19 @@ describe("Electron process boundaries", () => {
     expect(connectionProjection).toContain("passwordMask: string");
     expect(connectionProjection).not.toMatch(/plaintext|credentialRef|\bsecret\b/iu);
   });
+
+  it("documents the preview-only source-row exception", () => {
+    const agents = readFileSync(resolve(workspace, "AGENTS.md"), "utf8");
+    const architecture = readFileSync(resolve(workspace, "ARCHITECTURE.md"), "utf8");
+    for (const document of [agents, architecture]) {
+      expect(document).toMatch(/preview_flow_step[^\n]*sole transient source-row exception/iu);
+      expect(document).toMatch(/source rows never enter logs, SQLite, history, or other DTOs/iu);
+      expect(document).toMatch(/closing preview clears renderer state/iu);
+      expect(document).toMatch(/generic SQL/iu);
+      expect(document).toMatch(/passwords|credentials/iu);
+      expect(document).toMatch(/target bind value/iu);
+    }
+  });
 });
 
 function repositoryFiles(root: string): string[] {
