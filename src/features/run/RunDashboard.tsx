@@ -2,17 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { listConnections } from "../connections/connections.api";
 import type { Connection } from "../connections/connections.types";
 import { listFlows } from "../flows/flows.api";
-import type { Flow } from "../flows/flows.types";
+import { transactionPolicyLabel, type Flow } from "../flows/flows.types";
 import { RecoveryDialog } from "./RecoveryDialog";
 import { RunLog } from "./RunLog";
 import { recoverRun, startRun } from "./run.api";
 import { affectedRows, failedStep, statusKind, stepKind, type Run } from "./run.types";
 
 type Props = { run?: Run; initialFlows?: Flow[]; initialConnections?: Connection[] };
-
-function policyLabel(policy: Flow["transactionPolicy"]): string {
-  return policy === "all_or_nothing" ? "All or nothing" : "Commit successes";
-}
 
 export function RunDashboard({ run: suppliedRun, initialFlows, initialConnections }: Props) {
   const [flows, setFlows] = useState<Flow[]>(initialFlows ?? []);
@@ -63,7 +59,7 @@ export function RunDashboard({ run: suppliedRun, initialFlows, initialConnection
     <div className="section-heading"><div><p className="app-page__eyebrow">Execution</p><h1 id="run-dashboard-title">실행</h1></div><button onClick={() => void start()} disabled={!preflightReady || awaitingRecovery || starting}>Run</button></div>
     {notice ? <p role="status">{notice}</p> : null}
     {!suppliedRun ? <label className="run-flow-picker">Saved flow<select value={flowId} disabled={awaitingRecovery} onChange={(event) => setFlowId(event.target.value)}><option value="">Choose a flow</option>{flows.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
-    {flow ? <div className="run-summary"><p><strong>Source:</strong> {source?.displayName ?? flow.sourceConnectionId}</p><p><strong>Target:</strong> {target?.displayName ?? flow.targetConnectionId}</p><p><strong>Policy:</strong> {policyLabel(flow.transactionPolicy)}</p><p><strong>Preflight:</strong> {preflightReady ? "Ready" : "Resolve flow and connection requirements before running."}</p></div> : null}
+    {flow ? <div className="run-summary"><p><strong>Source:</strong> {source?.displayName ?? flow.sourceConnectionId}</p><p><strong>Target:</strong> {target?.displayName ?? flow.targetConnectionId}</p><p><strong>Policy:</strong> {transactionPolicyLabel(flow.transactionPolicy)}</p><p><strong>Preflight:</strong> {preflightReady ? "Ready" : "Resolve flow and connection requirements before running."}</p></div> : null}
     {run ? <><div className="run-summary"><p><strong>Status:</strong> {statusKind(run.status).replace(/_/g, " ")}</p><p><strong>Processed:</strong> {run.steps.reduce((total, step) => total + affectedRows(step), 0)} rows</p><p><strong>Duration:</strong> {elapsed}</p></div><ol className="run-steps" aria-label="Query step results">{run.steps.map((step, index) => <li key={index}>Step {index + 1}: {stepKind(step).replace(/_/g, " ")}{affectedRows(step) ? ` (${affectedRows(step)} rows)` : ""}</li>)}</ol><RunLog events={run.events} />
       <RecoveryDialog run={run} step={failedQuery} onEditRetry={(sql) => currentFailedStep !== undefined ? recover({ type: "edit_and_retry", stepId: failedQuery?.id ?? String(currentFailedStep), ...sql }) : undefined} onSkip={() => currentFailedStep !== undefined ? recover({ type: "skip_and_continue", stepId: failedQuery?.id ?? String(currentFailedStep) }) : undefined} onStop={() => currentFailedStep !== undefined ? recover({ type: "stop", stepId: failedQuery?.id ?? String(currentFailedStep) }) : undefined} />
     </> : null}

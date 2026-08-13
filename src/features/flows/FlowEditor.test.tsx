@@ -55,3 +55,10 @@ it("shows only executable target bind names", () => {
 
   expect(screen.getByText("Target binds: ID, email")).toBeVisible();
 });
+
+it("uses Korean labels for transaction policies", () => {
+  render(<FlowEditor connections={[]} onSave={vi.fn()} />);
+
+  expect(screen.getByRole("option", { name: "전체 롤백" })).toHaveValue("all_or_nothing");
+  expect(screen.getByRole("option", { name: "성공 단계 커밋" })).toHaveValue("commit_successes");
+});

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { QueryStepEditor } from "./QueryStepEditor";
-import type { Flow, FlowEditorProps, QueryStep, TransactionPolicy } from "./flows.types";
+import { transactionPolicyLabel, type Flow, type FlowEditorProps, type QueryStep, type TransactionPolicy } from "./flows.types";
 
 function nextId(prefix: string) { return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}`; }
 function newStep(): QueryStep { return { id: nextId("step"), operation: "insert", selectSql: "", upsertSql: "" }; }
@@ -39,7 +39,7 @@ export function FlowEditor({ connections, initialFlow, onSave, onCancel }: FlowE
     <label>Flow name<input value={flow.name} onChange={(event) => setFlow({ ...flow, name: event.target.value })} /></label>
     <label>Source connection<select value={flow.sourceConnectionId} onChange={(event) => setFlow({ ...flow, sourceConnectionId: event.target.value })}><option value="">Choose source</option>{connections.filter((connection) => connection.enabled).map((connection) => <option value={connection.id} key={connection.id}>{connection.displayName}</option>)}</select></label>
     <label>Target connection<select value={flow.targetConnectionId} onChange={(event) => setFlow({ ...flow, targetConnectionId: event.target.value })}><option value="">Choose target</option>{connections.filter((connection) => connection.enabled).map((connection) => <option value={connection.id} key={connection.id}>{connection.displayName}</option>)}</select></label>
-    <label>Transaction policy<select value={flow.transactionPolicy} onChange={(event) => setFlow({ ...flow, transactionPolicy: event.target.value as TransactionPolicy })}><option value="all_or_nothing">All or nothing</option><option value="commit_successes">Commit successes</option></select></label>
+    <label>Transaction policy<select value={flow.transactionPolicy} onChange={(event) => setFlow({ ...flow, transactionPolicy: event.target.value as TransactionPolicy })}><option value="all_or_nothing">{transactionPolicyLabel("all_or_nothing")}</option><option value="commit_successes">{transactionPolicyLabel("commit_successes")}</option></select></label>
     <div className="section-heading"><h3>Query steps</h3><button type="button" onClick={() => setFlow((current) => ({ ...current, querySteps: [...current.querySteps, newStep()] }))}>Add step</button></div>
     {flow.querySteps.map((step, index) => <QueryStepEditor key={step.id} step={step} position={index} total={flow.querySteps.length} onChange={(next) => updateStep(index, next)} onMove={(direction) => moveStep(index, direction)} onDelete={() => setFlow((current) => ({ ...current, querySteps: current.querySteps.filter((_, itemIndex) => itemIndex !== index) }))} />)}
     {error ? <p role="alert">{error}</p> : null}

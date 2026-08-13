@@ -1,4 +1,5 @@
 import type { RunEvent } from "./run.types";
+import { formatConnectorError } from "../../lib/oracleErrors";
 
 function eventText(event: RunEvent): string {
   if (event.type === "step_succeeded") return `Step ${event.step + 1}: committed ${event.affected_rows} rows.`;
@@ -8,7 +9,7 @@ function eventText(event: RunEvent): string {
 }
 
 function connectorDetail(error: Extract<RunEvent, { type: "step_failed" | "transaction_failed" }>['error']): string {
-  return error.type === "connector" ? ` (${error.detail.code}: ${error.detail.message})` : "";
+  return error.type === "connector" ? ` (${formatConnectorError(error.detail.code, error.detail.message)})` : "";
 }
 
 export function RunLog({ events }: { events: RunEvent[] }) {

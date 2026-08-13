@@ -54,6 +54,21 @@ it("shows the new-flow form above the saved-flow cards", async () => {
   expect(screen.getByText("Daily sync")).toBeVisible();
 });
 
+it("shows an all-or-nothing policy in Korean", async () => {
+  render(<FlowLibrary />);
+
+  expect(await screen.findByText("전체 롤백")).toBeVisible();
+  expect(screen.queryByText("All or nothing")).not.toBeInTheDocument();
+});
+
+it("shows a commit-successes policy in Korean", async () => {
+  listFlows.mockResolvedValueOnce([{ ...savedFlow, transactionPolicy: "commit_successes" as const }]);
+  render(<FlowLibrary />);
+
+  expect(await screen.findByText("성공 단계 커밋")).toBeVisible();
+  expect(screen.queryByText("Commit successes")).not.toBeInTheDocument();
+});
+
 it("marks the flow editor so its query area can use the larger layout", async () => {
   render(<FlowLibrary />);
 

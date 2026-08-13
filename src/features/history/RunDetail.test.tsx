@@ -23,3 +23,19 @@ it("renders a SkippedByUser recovery event without a bind value or source row", 
   expect(screen.getByText(/2026-08-01T00:01:00.000Z/)).toBeVisible();
   expect(screen.queryByText(/bind value|source row/i)).not.toBeInTheDocument();
 });
+
+it("renders Oracle errors in Korean without the driver message", () => {
+  const run: HistoryRun = {
+    runId: "run-4", flowId: "customer-relay", flowVersion: 3, startedAt: 0, endedAt: 1,
+    policy: "all_or_nothing", status: "failed", steps: ["failed"],
+    events: [{ type: "transaction_failed", error: {
+      type: "connector",
+      detail: { code: "ORA-00942", message: "Database operation failed", retryable: false },
+    } }],
+  };
+
+  render(<RunDetail run={run} />);
+
+  expect(screen.getByText(/ORA-00942 · 테이블 또는 뷰가 존재하지 않음/)).toBeVisible();
+  expect(screen.queryByText("Database operation failed")).not.toBeInTheDocument();
+});

@@ -15,7 +15,8 @@ it("offers exactly the three recovery decisions for a committed-step failure", (
   render(<RecoveryDialog run={run} onEditRetry={vi.fn()} onSkip={vi.fn()} onStop={vi.fn()} />);
 
   expect(screen.getByRole("dialog", { name: /recovery required/i })).toBeVisible();
-  expect(screen.getByText("ORA-00001")).toBeVisible();
+  expect(screen.getByText(/ORA-00001 · 고유 제약 조건 위반/)).toBeVisible();
+  expect(screen.queryByText("Unique constraint conflict")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /edit and retry/i })).toBeVisible();
   expect(screen.getByRole("button", { name: /skip and continue/i })).toBeVisible();
   expect(screen.getByRole("button", { name: /^stop$/i })).toBeVisible();

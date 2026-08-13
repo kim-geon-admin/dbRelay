@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { QueryStep } from "../flows/flows.types";
 import { failedStep, recoveryFailure, type Run } from "./run.types";
+import { formatConnectorError } from "../../lib/oracleErrors";
 
 type Props = {
   run: Run;
@@ -49,7 +50,7 @@ function RecoveryDialogContent({ run, step, failed, onEditRetry, onSkip, onStop 
   return <div className="recovery-backdrop" role="presentation"><section ref={dialogRef} className="recovery-dialog" role="dialog" aria-modal="true" aria-labelledby="recovery-title" onKeyDown={trapFocus}>
     <h2 id="recovery-title">Recovery required</h2>
     <p>Step {failed + 1} failed after {committed} committed step{committed === 1 ? "" : "s"}.</p>
-    {failure ? <p><strong>{failure.code}</strong>: {failure.message}</p> : null}
+    {failure ? <p>{formatConnectorError(failure.code, failure.message)}</p> : null}
     {mode === "choices" ? <div className="editor-actions"><button onClick={() => setMode("edit")}>Edit and retry</button><button onClick={() => setMode("skip")}>Skip and continue</button><button onClick={() => setMode("stop")}>Stop</button></div> : null}
     {mode === "edit" ? <div className="editor-form"><label>Source SQL<textarea className="sql-editor" value={selectSql} onChange={(event) => setSelectSql(event.target.value)} /></label><label>Target SQL<textarea className="sql-editor" value={upsertSql} onChange={(event) => setUpsertSql(event.target.value)} /></label>{!selectSql.trim() || !upsertSql.trim() ? <p role="alert">Both SQL statements are required.</p> : null}<div className="editor-actions"><button onClick={submitRetry} disabled={!selectSql.trim() || !upsertSql.trim()}>Retry step</button><button onClick={() => setMode("choices")}>Back</button></div></div> : null}
     {mode === "skip" ? <div><p role="alert">Skipping leaves this step&apos;s data unprocessed.</p><div className="editor-actions"><button onClick={() => void onSkip()}>Confirm skip and continue</button><button onClick={() => setMode("choices")}>Back</button></div></div> : null}

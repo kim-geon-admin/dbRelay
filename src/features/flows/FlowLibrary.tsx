@@ -3,7 +3,7 @@ import { listConnections } from "../connections/connections.api";
 import type { Connection } from "../connections/connections.types";
 import { FlowEditor } from "./FlowEditor";
 import { duplicateFlow, listFlows, saveFlow } from "./flows.api";
-import type { Flow } from "./flows.types";
+import { transactionPolicyLabel, type Flow } from "./flows.types";
 
 export function FlowLibrary() {
   const [flows, setFlows] = useState<Flow[]>([]);
@@ -23,7 +23,7 @@ export function FlowLibrary() {
       <ul className="flow-list" aria-label="Saved flows">
         {flows.map((flow) => <li key={flow.id} className="flow-card">
           <div><strong>{flow.name}</strong><p>{flow.querySteps.length} query step{flow.querySteps.length === 1 ? "" : "s"}</p></div>
-          <span>{flow.transactionPolicy === "all_or_nothing" ? "All or nothing" : "Commit successes"}</span>
+          <span>{transactionPolicyLabel(flow.transactionPolicy)}</span>
           <div className="editor-actions"><button onClick={() => setEditing(flow)}>Edit</button><button onClick={() => void duplicate(flow)}>Duplicate</button></div>
         </li>)}
       </ul>

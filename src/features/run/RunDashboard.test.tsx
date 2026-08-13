@@ -63,7 +63,7 @@ it("disables Run while its invocation is in flight", () => {
   resolveRun(rolledBackRun);
 });
 
-it("renders the exact tagged connector error received from Rust", () => {
+it("renders the tagged connector error in Korean without its driver message", () => {
   const run = JSON.parse(`{
     "runId":"run-connector-error","policy":"commit_successes",
     "status":{"awaiting_recovery":{"failed_step":0}},"steps":["failed"],
@@ -73,5 +73,6 @@ it("renders the exact tagged connector error received from Rust", () => {
   render(<RunDashboard run={run} />);
 
   expect(screen.getAllByText(/ORA-00001/)[0]).toBeVisible();
-  expect(screen.getAllByText(/Unique constraint conflict/)[0]).toBeVisible();
+  expect(screen.getAllByText(/고유 제약 조건 위반/)[0]).toBeVisible();
+  expect(screen.queryByText(/Unique constraint conflict/)).not.toBeInTheDocument();
 });
