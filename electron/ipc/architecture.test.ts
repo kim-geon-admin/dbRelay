@@ -52,6 +52,8 @@ describe("Electron process boundaries", () => {
       "update_connection",
       "disable_connection",
       "test_connection",
+      "set_connection_enabled",
+      "delete_connection",
       "list_flows",
       "save_flow",
       "duplicate_flow",

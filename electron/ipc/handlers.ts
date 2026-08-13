@@ -38,6 +38,8 @@ type SettingsBoundary = Pick<
   | "listConnections"
   | "listConnectionDtos"
   | "disableConnection"
+  | "setConnectionEnabled"
+  | "deleteConnection"
   | "testConnection"
 >;
 
@@ -91,6 +93,16 @@ export function createDbRelayCommandHandler(services: DbRelayServices): DbRelayC
           const input = requestFor(command, request).request;
           await services.settings.disableConnection(input.connectionId);
           return findConnection(await services.settings.listConnectionDtos(), input.connectionId);
+        }
+        case "set_connection_enabled": {
+          const input = requestFor(command, request).request;
+          await services.settings.setConnectionEnabled(input.connectionId, input.enabled);
+          return findConnection(await services.settings.listConnectionDtos(), input.connectionId);
+        }
+        case "delete_connection": {
+          const input = requestFor(command, request).request;
+          await services.settings.deleteConnection(input.connectionId);
+          return undefined;
         }
         case "test_connection": {
           const input = requestFor(command, request).request;
@@ -238,9 +250,14 @@ function isValidRequestBody(command: DbRelayCommand, body: Record<string, unknow
         && typeof body.enabled === "boolean"
         && (body.replacementSecret === undefined || typeof body.replacementSecret === "string");
     case "disable_connection":
+    case "delete_connection":
     case "test_connection":
       return hasOnlyKeys(body, ["connectionId"])
         && typeof body.connectionId === "string";
+    case "set_connection_enabled":
+      return hasOnlyKeys(body, ["connectionId", "enabled"])
+        && typeof body.connectionId === "string"
+        && typeof body.enabled === "boolean";
     case "save_flow":
       return isFlowBody(body);
     case "duplicate_flow":
@@ -544,6 +561,8 @@ function publicDetailFor(code: string): string {
       return "connection not found";
     case "CONNECTION_DISABLED":
       return "connection is disabled";
+    case "CONNECTION_REFERENCED":
+      return "The connection is used by a flow and cannot be deleted.";
     case "CREDENTIAL_NOT_FOUND":
     case "CREDENTIAL_STORE":
       return "credentials are unavailable";
@@ -575,6 +594,8 @@ function titleFor(code: string): string {
       return "Connection not found";
     case "CONNECTION_DISABLED":
       return "Connection is disabled";
+    case "CONNECTION_REFERENCED":
+      return "Connection is in use";
     case "CREDENTIAL_NOT_FOUND":
     case "CREDENTIAL_STORE":
       return "Credentials unavailable";

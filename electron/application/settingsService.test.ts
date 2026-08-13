@@ -52,6 +52,20 @@ describe("SettingsService", () => {
     });
   });
 
+  it("enables an existing connection without replacing its password", async () => {
+    const repository = new MemoryConnectionRepository();
+    const service = new SettingsService(repository);
+    await service.saveConnection({ ...profile(), enabled: false });
+
+    await service.setConnectionEnabled("production", true);
+
+    expect(repository.loadConnection("production")).toMatchObject({
+      enabled: true,
+      plaintextPassword: "secret123",
+      host: "db.example.test",
+    });
+  });
+
   it("delegates connection testing with the resolved plaintext password", async () => {
     const repository = new MemoryConnectionRepository();
     const opened: Array<{ id: string; secret: string }> = [];

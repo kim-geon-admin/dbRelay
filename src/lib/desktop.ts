@@ -42,6 +42,8 @@ type CommandRequestMap = {
   update_connection: { request: Omit<ConnectionDto, "passwordMask"> & { replacementSecret?: string } };
   disable_connection: { request: { connectionId: string } };
   test_connection: { request: { connectionId: string } };
+  set_connection_enabled: { request: { connectionId: string; enabled: boolean } };
+  delete_connection: { request: { connectionId: string } };
   list_flows: undefined;
   save_flow: { request: FlowDto };
   duplicate_flow: { request: { flowId: string; duplicateId: string } };
@@ -56,6 +58,8 @@ type CommandResponseMap = {
   update_connection: ConnectionDto;
   disable_connection: ConnectionDto;
   test_connection: { connectionId: string; connected: boolean };
+  set_connection_enabled: ConnectionDto;
+  delete_connection: undefined;
   list_flows: FlowDto[];
   save_flow: FlowDto;
   duplicate_flow: FlowDto;

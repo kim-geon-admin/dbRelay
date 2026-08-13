@@ -125,6 +125,15 @@ export class SettingsService {
     this.repository.disableConnection(connectionId);
   }
 
+  async setConnectionEnabled(connectionId: string, enabled: boolean): Promise<void> {
+    validateRequired(connectionId, "connection ID");
+    const existing = this.repository.loadConnection(connectionId);
+    if (existing === undefined) {
+      throw new SettingsServiceError("CONNECTION_NOT_FOUND", "connection not found");
+    }
+    this.repository.updateConnection({ ...existing, enabled });
+  }
+
   async deleteConnection(connectionId: string): Promise<void> {
     validateRequired(connectionId, "connection ID");
     this.repository.deleteConnection(connectionId);

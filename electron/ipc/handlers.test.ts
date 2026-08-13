@@ -6,6 +6,7 @@ import { FlowService } from "../application/flowService";
 import { SettingsService } from "../application/settingsService";
 import { ConnectorRegistry } from "../connectors/registry";
 import type { DatabaseConnectorFactory } from "../connectors/databaseConnector";
+import type { ConnectionProfile, Flow } from "../domain/models";
 import { SqliteRepository } from "../infrastructure/sqliteRepository";
 import type { DbRelayIpcResult } from "./commands";
 import {
@@ -76,6 +77,29 @@ describe("DB Relay command handler", () => {
     expect(JSON.stringify(response)).not.toContain("s3cret");
     expect(response[0]).not.toHaveProperty("plaintextPassword");
     expect(response[0]).not.toHaveProperty("credentialRef");
+  });
+
+  it("enables a disabled connection using only its ID and desired state", async () => {
+    const { handler, repository } = fixture();
+    repository.saveConnection({ ...connectionProfile(), enabled: false });
+
+    await expect(handler("set_connection_enabled", {
+      request: { connectionId: "production", enabled: true },
+    })).resolves.toMatchObject({ id: "production", enabled: true, passwordMask: "******" });
+    expect(repository.loadConnection("production")).toMatchObject({
+      enabled: true,
+      plaintextPassword: "s3cret",
+    });
+  });
+
+  it("rejects deletion of a flow-referenced connection without changing either record", async () => {
+    const { handler, repository } = fixtureWithReferencedConnection();
+
+    await expect(handler("delete_connection", {
+      request: { connectionId: "source" },
+    })).rejects.toMatchObject({ code: "CONNECTION_REFERENCED" });
+    expect(repository.loadConnection("source")).toBeDefined();
+    expect(repository.loadFlow("daily")).toBeDefined();
   });
 
   it("projects fixed structured errors with recovery context", async () => {
@@ -407,5 +431,46 @@ function fixture(): {
     handler: createDbRelayCommandHandler(services),
     repository,
     services,
+  };
+}
+
+function fixtureWithReferencedConnection() {
+  const result = fixture();
+  result.repository.saveConnection(connectionProfile("source"));
+  result.repository.saveConnection(connectionProfile("target"));
+  result.repository.saveFlow(referencedFlow());
+  return result;
+}
+
+function connectionProfile(id = "production"): ConnectionProfile {
+  return {
+    id,
+    displayName: id,
+    kind: "oracle",
+    host: "db.example.test",
+    port: 1521,
+    sid: "XE",
+    username: "relay",
+    credentialRef: id,
+    credentialStorage: "plaintext",
+    plaintextPassword: "s3cret",
+    enabled: true,
+    sourceReadOnly: false,
+  };
+}
+
+function referencedFlow(): Flow {
+  return {
+    id: "daily",
+    name: "Daily",
+    sourceConnectionId: "source",
+    targetConnectionId: "target",
+    querySteps: [{
+      id: "step-1",
+      selectSql: "SELECT id FROM source_table",
+      upsertSql: "MERGE INTO target_table USING dual ON (1 = 0) WHEN NOT MATCHED THEN INSERT (id) VALUES (:id)",
+    }],
+    transactionPolicy: "all_or_nothing",
+    version: 0,
   };
 }
