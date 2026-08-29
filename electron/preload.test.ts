@@ -1,22 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
-import { invokeDbRelayCommand, isAllowedCommand } from "./preload";
+import { DB_RELAY_RUN_PROGRESS_CHANNEL } from "./ipc/commands";
+import { invokeDbRelayCommand, isAllowedCommand, subscribeRunProgress } from "./preload";
 
 describe("isAllowedCommand", () => {
   it("accepts only DB Relay command names", () => {
     expect(isAllowedCommand("list_connections")).toBe(true);
     expect(isAllowedCommand("preview_flow_step")).toBe(true);
+    expect(isAllowedCommand("save_edited_preview")).toBe(true);
+    expect(isAllowedCommand("discard_edited_preview")).toBe(true);
     expect(isAllowedCommand("run_flow_step")).toBe(true);
+    expect(isAllowedCommand("delete_run_history")).toBe(true);
     expect(isAllowedCommand("execute_arbitrary_sql")).toBe(false);
   });
 
   it("forwards the two typed current-step commands through the allowlist", async () => {
     const invoke = vi.fn()
-      .mockResolvedValueOnce({ ok: true, value: { columns: ["ID"], rows: [{ ID: 1 }] } })
+      .mockResolvedValueOnce({ ok: true, value: { previewId: "preview-1", columns: ["ID"], rows: [{ ID: 1 }] } })
       .mockResolvedValueOnce({ ok: true, value: { affectedRows: 1 } });
 
     await expect(invokeDbRelayCommand(invoke, "preview_flow_step", {
       request: { sourceConnectionId: "source", selectSql: "SELECT id FROM t" },
-    })).resolves.toEqual({ columns: ["ID"], rows: [{ ID: 1 }] });
+    })).resolves.toEqual({ previewId: "preview-1", columns: ["ID"], rows: [{ ID: 1 }] });
     await expect(invokeDbRelayCommand(invoke, "run_flow_step", {
       request: {
         sourceConnectionId: "source", targetConnectionId: "target",
@@ -73,5 +77,37 @@ describe("isAllowedCommand", () => {
         detail: "The application command channel is unavailable.",
         code: "IPC_UNAVAILABLE",
       });
+  });
+
+  it("subscribes only to valid fixed-channel batch progress and removes its listener", () => {
+    // Would fail if preload exposed a generic event API, forwarded malformed
+    // payloads, or leaked the listener after the renderer unsubscribed.
+    let registered: ((event: unknown, progress: unknown) => void) | undefined;
+    const ipcRenderer = {
+      on: vi.fn((_channel: string, listener: (event: unknown, progress: unknown) => void) => {
+        registered = listener;
+      }),
+      removeListener: vi.fn(),
+    };
+    const receive = vi.fn();
+
+    const unsubscribe = subscribeRunProgress(ipcRenderer, receive);
+    registered?.({}, {
+      runId: "run-1", step: 0, processedRows: 1_000, totalRows: 2_001,
+      completedBatches: 1, totalBatches: 3,
+    });
+    registered?.({}, { runId: "run-1", processedRows: 1_000 });
+
+    expect(ipcRenderer.on).toHaveBeenCalledWith(DB_RELAY_RUN_PROGRESS_CHANNEL, expect.any(Function));
+    expect(receive).toHaveBeenCalledOnce();
+    expect(receive).toHaveBeenCalledWith({
+      runId: "run-1", step: 0, processedRows: 1_000, totalRows: 2_001,
+      completedBatches: 1, totalBatches: 3,
+    });
+    unsubscribe();
+    expect(ipcRenderer.removeListener).toHaveBeenCalledWith(
+      DB_RELAY_RUN_PROGRESS_CHANNEL,
+      expect.any(Function),
+    );
   });
 });

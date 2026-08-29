@@ -13,6 +13,7 @@ import type {
   StepStatus,
 } from "../domain/models";
 import { RunError, RunState } from "../domain/runState";
+import { safeConnectorDiagnostic } from "../domain/safeConnectorDiagnostic";
 import type {
   BoundRecoveryApply,
   ConnectionRepository,
@@ -85,7 +86,11 @@ type StoredRun = {
   steps: StepStatus[];
   events: StoredRunEvent[];
   flow_id?: string;
+  flow_name?: string;
+  source_db_name?: string;
+  target_db_name?: string;
   flow_version?: number;
+  step_titles?: string[];
   binding?: StoredRunBinding;
 };
 
@@ -240,6 +245,15 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
     })());
   }
 
+  deleteFlow(flowId: string): void {
+    const result = this.port(() => this.database.prepare(
+      "DELETE FROM flows WHERE id = ?",
+    ).run(flowId));
+    if (result.changes === 0) {
+      throw new RepositoryError("FLOW_NOT_FOUND", "flow not found");
+    }
+  }
+
   loadFlow(flowId: string): Flow | undefined {
     return this.sqlite(() => this.loadFlowDirect(flowId));
   }
@@ -260,7 +274,9 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
   createRunForFlow(runId: string, state: RunState, flow: Flow): void {
     const stored = storedRunFromState(state);
     stored.flow_id = flow.id;
+    stored.flow_name = flow.name;
     stored.flow_version = flow.version;
+    stored.step_titles = stepTitlesForFlow(flow);
     this.createStoredRun(runId, state, stored);
   }
 
@@ -290,7 +306,7 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
     const rows = this.sqlite(() => this.database.prepare(`
       SELECT id, state_json, started_at_ms, ended_at_ms
       FROM runs
-      ORDER BY id DESC
+      ORDER BY started_at_ms DESC, id DESC
     `).all()) as Array<{
       id: string;
       state_json: string;
@@ -302,12 +318,46 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
       return {
         runId: row.id,
         flowId: stored.flow_id,
+        flowName: stored.flow_name ?? (stored.flow_id === undefined
+          ? undefined
+          : this.loadFlowDirect(stored.flow_id)?.name),
+        sourceDbName: stored.source_db_name ?? stored.binding?.source_connection_id,
+        targetDbName: stored.target_db_name ?? stored.binding?.target_connection_id,
         flowVersion: stored.flow_version,
+        stepTitles: stored.step_titles ?? [],
         startedAtMs: row.started_at_ms,
         endedAtMs: row.ended_at_ms ?? undefined,
         state: stateFromStoredRun(stored),
       };
     });
+  }
+
+  deleteRun(runId: string): boolean {
+    return this.port(() => this.database.transaction(() => {
+      const row = this.database.prepare("SELECT state_json FROM runs WHERE id = ?").get(runId) as
+        | { state_json: string }
+        | undefined;
+      if (row === undefined) {
+        return false;
+      }
+      if (!isTerminal(stateFromStoredRun(parseStoredRun(row.state_json)).status())) {
+        throw new RepositoryError("RUN_NOT_DELETABLE", "unfinished run history cannot be deleted");
+      }
+      this.database.prepare("DELETE FROM run_steps WHERE run_id = ?").run(runId);
+      this.database.prepare("DELETE FROM recovery_events WHERE run_id = ?").run(runId);
+      this.database.prepare("DELETE FROM runs WHERE id = ?").run(runId);
+      return true;
+    })());
+  }
+
+  clearRuns(): number {
+    return this.port(() => this.database.transaction(() => {
+      const count = (this.database.prepare("SELECT COUNT(*) AS count FROM runs").get() as { count: number }).count;
+      this.database.prepare("DELETE FROM run_steps").run();
+      this.database.prepare("DELETE FROM recovery_events").run();
+      this.database.prepare("DELETE FROM runs").run();
+      return count;
+    })());
   }
 
   loadRunBinding(runId: string): RunBinding | undefined {
@@ -429,6 +479,7 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
           flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
           position INTEGER NOT NULL,
           id TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
           select_sql TEXT NOT NULL,
           upsert_sql TEXT NOT NULL,
           PRIMARY KEY (flow_id, position)
@@ -458,6 +509,7 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
       this.addColumnIfMissing("connection_profiles", "source_read_only", "source_read_only INTEGER NOT NULL DEFAULT 0");
       this.addColumnIfMissing("runs", "started_at_ms", "started_at_ms INTEGER NOT NULL DEFAULT 0");
       this.addColumnIfMissing("runs", "ended_at_ms", "ended_at_ms INTEGER");
+      this.addColumnIfMissing("query_steps", "title", "title TEXT NOT NULL DEFAULT ''");
       this.migrateLegacySchema();
       this.migrateLegacyRunHistory();
     });
@@ -506,6 +558,7 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
               flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
               position INTEGER NOT NULL,
               id TEXT NOT NULL,
+              title TEXT NOT NULL DEFAULT '',
               select_sql TEXT NOT NULL,
               upsert_sql TEXT NOT NULL,
               PRIMARY KEY (flow_id, position)
@@ -629,11 +682,11 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
   private replaceFlowSteps(flow: Flow): void {
     this.database.prepare("DELETE FROM query_steps WHERE flow_id = ?").run(flow.id);
     const insert = this.database.prepare(`
-      INSERT INTO query_steps (flow_id, position, id, select_sql, upsert_sql)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO query_steps (flow_id, position, id, title, select_sql, upsert_sql)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     flow.querySteps.forEach((step, position) => {
-      insert.run(flow.id, position, step.id, step.selectSql, step.upsertSql);
+      insert.run(flow.id, position, step.id, step.title?.trim() || `Step ${position + 1}`, step.selectSql, step.upsertSql);
     });
   }
 
@@ -654,9 +707,9 @@ export class SqliteRepository implements ConnectionRepository, FlowRepository, H
       return undefined;
     }
     const steps = this.database.prepare(`
-      SELECT id, select_sql, upsert_sql
+      SELECT id, title, select_sql, upsert_sql
       FROM query_steps WHERE flow_id = ? ORDER BY position
-    `).all(flowId) as Array<{ id: string; select_sql: string; upsert_sql: string }>;
+    `).all(flowId) as Array<{ id: string; title: string; select_sql: string; upsert_sql: string }>;
     return {
       id: row.id,
       name: row.name,
@@ -743,14 +796,18 @@ function connectionFromRow(row: ConnectionRow): ConnectionProfile {
   };
 }
 
-function queryStepFromRow(row: { id: string; select_sql: string; upsert_sql: string }): QueryStep {
-  return { id: row.id, selectSql: row.select_sql, upsertSql: row.upsert_sql };
+function queryStepFromRow(row: { id: string; title: string; select_sql: string; upsert_sql: string }, position: number): QueryStep {
+  return { id: row.id, title: row.title.trim() || `Step ${position + 1}`, selectSql: row.select_sql, upsertSql: row.upsert_sql };
 }
 
 function storedRunFromBinding(state: RunState, binding: RunBinding): StoredRun {
   const stored = storedRunFromState(state);
   stored.flow_id = binding.flow.id;
+  stored.flow_name = binding.flow.name;
+  stored.source_db_name = binding.sourceProfile.displayName;
+  stored.target_db_name = binding.targetProfile.displayName;
   stored.flow_version = binding.flow.version;
+  stored.step_titles = stepTitlesForFlow(binding.flow);
   stored.binding = storedBinding(binding);
   return stored;
 }
@@ -805,7 +862,8 @@ function stateFromStoredRun(stored: StoredRun): RunState {
             step: event.step,
             error: RunError.connectorWithRetryable(
               event.error_code,
-              sanitizeHistoryMessage(event.error_message),
+              safeConnectorDiagnostic(event.error_code, event.error_message)
+                ?? sanitizeHistoryMessage(event.error_message),
               event.retryable,
             ).toJSON(),
           };
@@ -814,7 +872,8 @@ function stateFromStoredRun(stored: StoredRun): RunState {
             type: event.type,
             error: RunError.connectorWithRetryable(
               event.error_code,
-              sanitizeHistoryMessage(event.error_message),
+              safeConnectorDiagnostic(event.error_code, event.error_message)
+                ?? sanitizeHistoryMessage(event.error_message),
               event.retryable,
             ).toJSON(),
           };
@@ -969,7 +1028,8 @@ function sanitizeStoredRun(stored: StoredRun): StoredRun {
       return {
         ...event,
         error_code: historyCode(RunError.connector(event.error_code, "").toJSON()),
-        error_message: sanitizeHistoryMessage(event.error_message ?? ""),
+        error_message: safeConnectorDiagnostic(event.error_code, event.error_message ?? "")
+          ?? sanitizeHistoryMessage(event.error_message ?? ""),
         retryable: event.retryable ?? false,
       };
     }
@@ -1037,9 +1097,15 @@ function connectorRetryable(error: RunErrorData): boolean {
 }
 
 function safeHistoryMessage(error: RunErrorData): string {
-  return error.type === "connector"
-    ? sanitizeHistoryMessage(error.detail.message)
-    : "sanitized persisted run error";
+  if (error.type !== "connector") {
+    return "sanitized persisted run error";
+  }
+  return safeConnectorDiagnostic(error.detail.code, error.detail.message)
+    ?? sanitizeHistoryMessage(error.detail.message);
+}
+
+function stepTitlesForFlow(flow: Flow): string[] {
+  return flow.querySteps.map((step, position) => step.title?.trim() || `Step ${position + 1}`);
 }
 
 function sanitizeHistoryMessage(message: string): string {

@@ -18,8 +18,13 @@ export class ConnectorError extends Error {
 
 export interface DatabaseSession {
   query(sql: string): Promise<RowSet>;
+  queryNamed?(sql: string, rows: readonly NamedRow[]): Promise<RowSet>;
   begin(): Promise<void>;
   executeNamed(sql: string, rows: readonly NamedRow[]): Promise<number>;
+  executeNamedReturningRowIds?(sql: string, rows: readonly NamedRow[]): Promise<{
+    affectedRows: number;
+    rowIds: string[];
+  }>;
   commit(): Promise<void>;
   rollback(): Promise<void>;
   close(): Promise<void>;

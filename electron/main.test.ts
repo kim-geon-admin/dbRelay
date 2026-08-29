@@ -21,8 +21,12 @@ const electron = vi.hoisted(() => {
     on: vi.fn(),
     quit: vi.fn(),
   };
+  const dialog = {
+    showOpenDialog: vi.fn(),
+    showSaveDialog: vi.fn(),
+  };
 
-  return { app, browserWindow, navigationHandlers, webContents };
+  return { app, browserWindow, dialog, navigationHandlers, webContents };
 });
 
 vi.mock("electron", () => ({
@@ -33,6 +37,7 @@ vi.mock("electron", () => ({
     getAllWindows: vi.fn().mockReturnValue([electron.browserWindow]),
   }),
   ipcMain: { handle: vi.fn() },
+  dialog: electron.dialog,
 }));
 
 vi.mock("./infrastructure/sqliteRepository", () => ({

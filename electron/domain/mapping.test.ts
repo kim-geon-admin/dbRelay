@@ -40,6 +40,14 @@ describe("Oracle named-bind mapping", () => {
       .toEqual({ "ß": 1, ss: 2 });
   });
 
+  it("extracts and maps Korean named binds", () => {
+    const binds = extractNamedBinds("UPDATE TGT_USERS SET DISPLAY_NAME = :표시명 WHERE USER_ID = :사용자ID");
+
+    expect(binds).toEqual(["표시명", "사용자ID"]);
+    expect(mapRow({ 사용자ID: 1001, 표시명: "홍길동" }, binds))
+      .toEqual({ 표시명: "홍길동", 사용자ID: 1001 });
+  });
+
   it("rejects numeric bind placeholders", () => {
     expect(() => extractNamedBinds("update t set value = :1"))
       .toThrow("numeric bind placeholder is not supported: 1");

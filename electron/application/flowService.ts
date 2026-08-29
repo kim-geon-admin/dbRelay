@@ -19,27 +19,22 @@ export class FlowService {
   constructor(private readonly repository: FlowRepository) {}
 
   async saveFlow(flow: Flow): Promise<Flow> {
-    validateFlow(flow);
-    if (flow.sourceConnectionId === flow.targetConnectionId) {
-      throw new FlowServiceError(
-        "CONNECTIONS_NOT_DISTINCT",
-        "source and target connections must be different",
-      );
-    }
-    if (this.repository.loadConnection(flow.sourceConnectionId) === undefined) {
+    const normalized = normalizeFlowStepTitles(flow);
+    validateFlow(normalized);
+    if (this.repository.loadConnection(normalized.sourceConnectionId) === undefined) {
       throw new FlowServiceError(
         "CONNECTION_NOT_FOUND",
         "source connection was not found",
       );
     }
-    if (this.repository.loadConnection(flow.targetConnectionId) === undefined) {
+    if (this.repository.loadConnection(normalized.targetConnectionId) === undefined) {
       throw new FlowServiceError(
         "CONNECTION_NOT_FOUND",
         "target connection was not found",
       );
     }
-    this.repository.saveFlow(flow);
-    const saved = this.repository.loadFlow(flow.id);
+    this.repository.saveFlow(normalized);
+    const saved = this.repository.loadFlow(normalized.id);
     if (saved === undefined) {
       throw new FlowServiceError("FLOW_NOT_FOUND", "flow could not be reloaded");
     }
@@ -48,6 +43,14 @@ export class FlowService {
 
   async listFlows(): Promise<Flow[]> {
     return this.repository.listFlows();
+  }
+
+  async deleteFlow(flowId: string): Promise<void> {
+    validateRequired(flowId, "flow ID");
+    if (this.repository.loadFlow(flowId) === undefined) {
+      throw new FlowServiceError("FLOW_NOT_FOUND", "flow not found");
+    }
+    this.repository.deleteFlow(flowId);
   }
 
   async duplicateFlow(flowId: string, duplicateId: string): Promise<Flow> {
@@ -66,6 +69,16 @@ export class FlowService {
       name: `${source.name} copy`,
     });
   }
+}
+
+export function normalizeFlowStepTitles(flow: Flow): Flow {
+  return {
+    ...flow,
+    querySteps: flow.querySteps.map((step, position) => ({
+      ...step,
+      title: step.title?.trim() || `Step ${position + 1}`,
+    })),
+  };
 }
 
 function validateFlow(flow: Flow): void {

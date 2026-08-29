@@ -1,0 +1,37 @@
+{
+  "description": "Test data for insert/update/upsert, preview, # row copy, and column sequence behavior",
+  "rows": [
+    {
+      "case": "insert",
+      "operation": "insert",
+      "source": { "USER_ID": 9001, "LOGIN_ID": "preview.insert.9001", "DISPLAY_NAME": "Preview Insert", "EMAIL": "insert@example.test" },
+      "targetSql": "INSERT INTO TGT_USERS (USER_ID, LOGIN_ID, DISPLAY_NAME, EMAIL) VALUES (:USER_ID, :LOGIN_ID, :DISPLAY_NAME, :EMAIL)"
+    },
+    {
+      "case": "update",
+      "operation": "update",
+      "source": { "USER_ID": 9002, "LOGIN_ID": "preview.update.9002", "DISPLAY_NAME": "Preview Update", "EMAIL": "update@example.test" },
+      "targetSql": "UPDATE TGT_USERS SET LOGIN_ID = :LOGIN_ID, DISPLAY_NAME = :DISPLAY_NAME, EMAIL = :EMAIL WHERE USER_ID = :USER_ID"
+    },
+    {
+      "case": "upsert",
+      "operation": "upsert",
+      "source": { "USER_ID": 9003, "LOGIN_ID": "preview.upsert.9003", "DISPLAY_NAME": "Preview Upsert", "EMAIL": "upsert@example.test" },
+      "targetSql": "MERGE INTO TGT_USERS t USING (SELECT :USER_ID USER_ID, :LOGIN_ID LOGIN_ID, :DISPLAY_NAME DISPLAY_NAME, :EMAIL EMAIL FROM dual) s ON (t.USER_ID = s.USER_ID) WHEN MATCHED THEN UPDATE SET t.LOGIN_ID = s.LOGIN_ID, t.DISPLAY_NAME = s.DISPLAY_NAME, t.EMAIL = s.EMAIL WHEN NOT MATCHED THEN INSERT (USER_ID, LOGIN_ID, DISPLAY_NAME, EMAIL) VALUES (s.USER_ID, s.LOGIN_ID, s.DISPLAY_NAME, s.EMAIL)"
+    },
+    {
+      "case": "preview-hash-copy",
+      "operation": "insert",
+      "source": { "USER_ID": 9010, "LOGIN_ID": "preview.copy.9010", "DISPLAY_NAME": "Preview Copy", "EMAIL": "copy@example.test" },
+      "generateRows": 3,
+      "expectedGeneratedRows": 3
+    },
+    {
+      "case": "preview-column-sequence",
+      "operation": "insert",
+      "source": { "USER_ID": 9020, "LOGIN_ID": "preview.sequence.9020", "DISPLAY_NAME": "Preview Sequence", "EMAIL": "sequence@example.test" },
+      "sequenceColumn": "USER_ID",
+      "expectedSequence": [9020, 9021, 9022]
+    }
+  ]
+}

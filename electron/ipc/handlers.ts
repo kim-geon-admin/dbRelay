@@ -1,19 +1,31 @@
 import type { HistoryService } from "../application/historyService";
-import { MigrationRunnerError, type MigrationRunner, type RecoveryRequest } from "../application/migrationRunner";
+import { FlowTransferError, type FlowTransferService } from "../application/flowTransferService";
+import {
+  MigrationRunnerError,
+  type MigrationRunner,
+  type RecoveryRequest,
+  type RunProgress,
+} from "../application/migrationRunner";
 import { FlowServiceError, type FlowService } from "../application/flowService";
 import { SettingsServiceError, type SettingsService } from "../application/settingsService";
 import { ConnectorError, type ConnectorRegistry } from "../connectors/registry";
 import type {
   ConnectionProfile,
+  DomainValue,
   Flow,
+  NamedRow,
+  OracleDate,
+  OracleTimestamp,
   RunErrorData,
   RunEvent,
   RunStatus,
   StepStatus,
 } from "../domain/models";
 import { RepositoryError } from "../infrastructure/sqliteRepository";
+import { safeConnectorDiagnostic } from "../domain/safeConnectorDiagnostic";
 import {
   DB_RELAY_CHANNEL,
+  DB_RELAY_RUN_PROGRESS_CHANNEL,
   type CommandErrorDto,
   type CommandRequestMap,
   type CommandResponseMap,
@@ -29,6 +41,7 @@ import {
   type RunDto,
   type RunErrorDto,
   type RunEventDto,
+  type RunProgressDto,
   type RunStatusDto,
   type StepStatusDto,
 } from "./commands";
@@ -47,9 +60,12 @@ type SettingsBoundary = Pick<
 
 export interface DbRelayServices {
   settings: SettingsBoundary;
-  flows: Pick<FlowService, "saveFlow" | "listFlows" | "duplicateFlow">;
-  runs: Pick<MigrationRunner, "previewFlowStep" | "runFlowStep" | "startRun" | "recoverRun">;
-  history: Pick<HistoryService, "listRunHistory">;
+  flows: Pick<FlowService, "saveFlow" | "listFlows" | "duplicateFlow" | "deleteFlow">;
+  runs: Pick<MigrationRunner,
+    "previewFlowStep" | "saveEditedPreview" | "discardEditedPreview" | "runFlowStep" | "restoreFlowStep" | "discardStepRestore" | "discardEditorRestores" | "startRun" | "recoverRun"
+  >;
+  history: Pick<HistoryService, "listRunHistory" | "deleteRunHistory" | "clearRunHistory">;
+  flowTransfer: Pick<FlowTransferService, "exportFlow" | "importFlow">;
   connectors: Pick<ConnectorRegistry, "forKind">;
 }
 
@@ -70,7 +86,10 @@ export interface IpcMainRegistrar {
 
 const projectedCommandError = Symbol("projected DB Relay command error");
 
-export function createDbRelayCommandHandler(services: DbRelayServices): DbRelayCommandHandler {
+export function createDbRelayCommandHandler(
+  services: DbRelayServices,
+  onRunProgress?: (progress: RunProgressDto) => void,
+): DbRelayCommandHandler {
   const dispatch = async (command: string, request?: unknown): Promise<unknown> => {
     if (!isDbRelayCommand(command)) {
       throw commandNotAllowed();
@@ -127,21 +146,71 @@ export function createDbRelayCommandHandler(services: DbRelayServices): DbRelayC
           const input = requestFor(command, request).request;
           return projectFlow(await services.flows.duplicateFlow(input.flowId, input.duplicateId));
         }
+        case "export_flow": {
+          const input = requestFor(command, request).request;
+          return { exported: await services.flowTransfer.exportFlow(input.flowId) };
+        }
+        case "delete_flow":
+          await services.flows.deleteFlow(requestFor(command, request).request.flowId);
+          return undefined;
+        case "import_flow": {
+          const result = await services.flowTransfer.importFlow();
+          if (result.kind === "cancelled") return { status: "cancelled" };
+          if (result.kind === "needs_connection_selection") {
+            return { status: "needs_connection_selection", flow: projectFlow(result.flow) };
+          }
+          return { status: "saved", flow: projectFlow(await services.flows.saveFlow(result.flow)) };
+        }
         case "preview_flow_step": {
           const input = requestFor(command, request).request;
           return projectPreview(await services.runs.previewFlowStep(input));
         }
+        case "save_edited_preview": {
+          const input = requestFor(command, request).request;
+          services.runs.saveEditedPreview({
+            previewId: input.previewId,
+            columns: input.columns,
+            rows: input.rows.map(decodePreviewRow),
+          });
+          return undefined;
+        }
+        case "discard_edited_preview": {
+          services.runs.discardEditedPreview(requestFor(command, request).request.previewId);
+          return undefined;
+        }
         case "run_flow_step": {
           const input = requestFor(command, request).request;
           const result = await services.runs.runFlowStep(input);
-          return { affectedRows: result.affectedRows };
+          return result.restoreId === undefined
+            ? { affectedRows: result.affectedRows }
+            : { affectedRows: result.affectedRows, restoreId: result.restoreId };
         }
+        case "restore_flow_step":
+          return services.runs.restoreFlowStep(requestFor(command, request).request);
+        case "discard_step_restore":
+          services.runs.discardStepRestore(requestFor(command, request).request.restoreId);
+          return undefined;
+        case "discard_editor_restores":
+          services.runs.discardEditorRestores(requestFor(command, request).request.editorSessionId);
+          return undefined;
         case "start_run":
-          return projectRun(await services.runs.startRun(requestFor(command, request).request.flowId));
+          return projectRun(await services.runs.startRun(
+            requestFor(command, request).request.flowId,
+            onRunProgress === undefined ? undefined : (progress) => {
+              const projected = projectRunProgress(progress);
+              if (projected !== undefined) onRunProgress(projected);
+            },
+          ));
         case "recover_run": {
           const input = requestFor(command, request).request;
           try {
-            return projectRun(await services.runs.recoverRun(recoveryRequest(input)));
+            return projectRun(await services.runs.recoverRun(
+              recoveryRequest(input),
+              onRunProgress === undefined ? undefined : (progress) => {
+                const projected = projectRunProgress(progress);
+                if (projected !== undefined) onRunProgress(projected);
+              },
+            ));
           } catch (error) {
             throw projectCommandError(error, {
               runId: input.run_id,
@@ -151,6 +220,11 @@ export function createDbRelayCommandHandler(services: DbRelayServices): DbRelayC
         }
         case "list_run_history":
           return (await services.history.listRunHistory()).map(projectHistoryRun);
+        case "delete_run_history":
+          await services.history.deleteRunHistory(requestFor(command, request).request.runId);
+          return undefined;
+        case "clear_run_history":
+          return { deletedCount: await services.history.clearRunHistory() };
       }
       const exhaustiveCommand: never = command;
       return exhaustiveCommand;
@@ -167,7 +241,6 @@ export function registerDbRelayIpc(
   services: DbRelayServices,
   isTrustedSender: (event: unknown) => boolean,
 ): void {
-  const handler = createDbRelayCommandHandler(services);
   ipcMain.handle(DB_RELAY_CHANNEL, async (event, command, request) => {
     if (!isTrustedSender(event)) {
       return {
@@ -182,6 +255,11 @@ export function registerDbRelayIpc(
     if (!isDbRelayCommand(command)) {
       return { ok: false, error: commandNotAllowed() };
     }
+    const handler = createDbRelayCommandHandler(services, (progress) => {
+      const sender = senderForProgress(event);
+      if (sender?.isDestroyed?.()) return;
+      sender?.send(DB_RELAY_RUN_PROGRESS_CHANNEL, progress);
+    });
     try {
       return { ok: true, value: await handler(command, request as never) };
     } catch (error) {
@@ -231,7 +309,7 @@ export function projectCommandError(
 }
 
 function requestFor<Command extends Exclude<DbRelayCommand,
-  "list_connections" | "list_flows" | "list_run_history">>(
+  "list_connections" | "list_flows" | "import_flow" | "list_run_history" | "clear_run_history">>(
   command: Command,
   request: unknown,
 ): CommandRequestMap[Command] {
@@ -269,22 +347,47 @@ function isValidRequestBody(command: DbRelayCommand, body: Record<string, unknow
       return hasOnlyKeys(body, ["connectionId", "enabled"])
         && typeof body.connectionId === "string"
         && typeof body.enabled === "boolean";
+    case "delete_run_history":
+      return hasOnlyKeys(body, ["runId"])
+        && typeof body.runId === "string";
     case "save_flow":
       return isFlowBody(body);
     case "duplicate_flow":
       return hasOnlyKeys(body, ["flowId", "duplicateId"])
         && typeof body.flowId === "string"
         && typeof body.duplicateId === "string";
+    case "export_flow":
+    case "delete_flow":
+      return hasOnlyKeys(body, ["flowId"])
+        && typeof body.flowId === "string";
     case "preview_flow_step":
       return hasOnlyKeys(body, ["sourceConnectionId", "selectSql"])
         && typeof body.sourceConnectionId === "string"
         && typeof body.selectSql === "string";
+    case "save_edited_preview":
+      return hasOnlyKeys(body, ["previewId", "columns", "rows"])
+        && typeof body.previewId === "string"
+        && isStringArray(body.columns)
+        && new Set(body.columns).size === body.columns.length
+        && Array.isArray(body.rows)
+        && body.rows.every((row) => isPreviewRowWithColumns(row, body.columns as string[]));
+    case "discard_edited_preview":
+      return hasOnlyKeys(body, ["previewId"])
+        && typeof body.previewId === "string";
     case "run_flow_step":
-      return hasOnlyKeys(body, ["sourceConnectionId", "targetConnectionId", "selectSql", "upsertSql"])
+      return hasOnlyKeys(body, ["sourceConnectionId", "targetConnectionId", "selectSql", "upsertSql", "previewId", "editorSessionId", "stepId"])
         && typeof body.sourceConnectionId === "string"
         && typeof body.targetConnectionId === "string"
         && typeof body.selectSql === "string"
-        && typeof body.upsertSql === "string";
+        && typeof body.upsertSql === "string"
+        && (body.previewId === undefined || typeof body.previewId === "string")
+        && (body.editorSessionId === undefined || typeof body.editorSessionId === "string")
+        && (body.stepId === undefined || typeof body.stepId === "string");
+    case "restore_flow_step":
+    case "discard_step_restore":
+      return hasOnlyKeys(body, ["restoreId"]) && typeof body.restoreId === "string" && body.restoreId.length > 0;
+    case "discard_editor_restores":
+      return hasOnlyKeys(body, ["editorSessionId"]) && typeof body.editorSessionId === "string" && body.editorSessionId.length > 0;
     case "start_run":
       return hasOnlyKeys(body, ["flowId"])
         && typeof body.flowId === "string";
@@ -292,7 +395,9 @@ function isValidRequestBody(command: DbRelayCommand, body: Record<string, unknow
       return isRecoveryBody(body);
     case "list_connections":
     case "list_flows":
+    case "import_flow":
     case "list_run_history":
+    case "clear_run_history":
       return false;
   }
 }
@@ -326,13 +431,15 @@ function isFlowBody(body: Record<string, unknown>): boolean {
 
 function isQueryStepBody(value: unknown): boolean {
   return isRecord(value)
-    && hasOnlyKeys(value, ["id", "selectSql", "upsertSql", "operation"])
+    && hasOnlyKeys(value, ["id", "title", "selectSql", "upsertSql", "operation"])
     && typeof value.id === "string"
+    && (value.title === undefined || typeof value.title === "string")
     && typeof value.selectSql === "string"
     && typeof value.upsertSql === "string"
     && (value.operation === undefined
       || value.operation === "insert"
-      || value.operation === "update");
+      || value.operation === "update"
+      || value.operation === "upsert");
 }
 
 function isRecoveryBody(body: Record<string, unknown>): boolean {
@@ -429,6 +536,7 @@ function projectFlow(flow: Flow): FlowDto {
     targetConnectionId: flow.targetConnectionId,
     querySteps: flow.querySteps.map((step) => ({
       id: step.id,
+      ...(step.title === undefined ? {} : { title: step.title }),
       selectSql: step.selectSql,
       upsertSql: step.upsertSql,
     })),
@@ -438,13 +546,87 @@ function projectFlow(flow: Flow): FlowDto {
 }
 
 function projectPreview(preview: {
+  previewId: string;
   columns: string[];
   rows: Array<Record<string, unknown>>;
 }): PreviewFlowStepDto {
   return {
+    previewId: preview.previewId,
     columns: preview.columns.map((column) => column),
     rows: preview.rows.map((row) => projectPreviewRow(row)),
   };
+}
+
+function isPreviewRow(value: unknown): value is Record<string, PreviewCellDto> {
+  return isRecord(value) && Object.values(value).every(isEditablePreviewCell);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isPreviewRowWithColumns(value: unknown, columns: readonly string[]): boolean {
+  return isPreviewRow(value)
+    && Object.keys(value).length === columns.length
+    && columns.every((column) => Object.prototype.hasOwnProperty.call(value, column));
+}
+
+function isEditablePreviewCell(value: unknown): value is PreviewCellDto {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (!isPlainRecord(value)) return false;
+  if (value.type === "bytes") {
+    return hasOnlyKeys(value, ["type", "base64"])
+      && typeof value.base64 === "string"
+      && isBase64(value.base64);
+  }
+  if (value.type === "bigint") {
+    return hasOnlyKeys(value, ["type", "decimal"])
+      && typeof value.decimal === "string"
+      && /^-?(?:0|[1-9][0-9]*)$/u.test(value.decimal);
+  }
+  return isPreviewTemporal(value);
+}
+
+function isPreviewTemporal(value: Record<string, unknown>): boolean {
+  const dateKeys = ["year", "month", "day", "hour", "minute", "second"];
+  const timestampKeys = [...dateKeys, "microsecond", "tzHourOffset", "tzMinuteOffset"];
+  const keys = Object.keys(value).sort();
+  const expected = ("microsecond" in value ? timestampKeys : dateKeys).sort();
+  return keys.length === expected.length
+    && keys.every((key, index) => key === expected[index])
+    && expected.every((key) => typeof value[key] === "number" && Number.isInteger(value[key]));
+}
+
+function decodePreviewRow(row: Record<string, PreviewCellDto>): NamedRow {
+  return Object.fromEntries(Object.entries(row).map(([column, value]) => [
+    column,
+    decodePreviewCell(value),
+  ]));
+}
+
+function decodePreviewCell(value: PreviewCellDto): DomainValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (!isPlainRecord(value)) {
+    throw serviceError("INVALID_REQUEST", "preview cell is invalid");
+  }
+  if (isBytes(value)) return new Uint8Array(Buffer.from(value.base64, "base64"));
+  if (isBigInt(value)) return BigInt(value.decimal);
+  return value as OracleDate | OracleTimestamp;
+}
+
+function isBytes(value: Record<string, unknown>): value is Record<string, unknown> & { type: "bytes"; base64: string } {
+  return value.type === "bytes" && typeof value.base64 === "string";
+}
+
+function isBigInt(value: Record<string, unknown>): value is Record<string, unknown> & { type: "bigint"; decimal: string } {
+  return value.type === "bigint" && typeof value.decimal === "string";
+}
+
+function isBase64(value: string): boolean {
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value);
 }
 
 function projectPreviewRow(row: Record<string, unknown>): Record<string, PreviewCellDto> {
@@ -526,6 +708,28 @@ function projectRun(run: RunDto): RunDto {
     status: projectStatus(run.status),
     steps: run.steps.map(projectStep),
     events: run.events.map(projectEvent),
+    stepTitles: [...(run.stepTitles ?? [])],
+  };
+}
+
+function projectRunProgress(progress: RunProgress): RunProgressDto | undefined {
+  if (typeof progress.runId !== "string" || progress.runId.length === 0
+    || !isNonNegativeSafeInteger(progress.step)
+    || !isNonNegativeSafeInteger(progress.processedRows)
+    || !isNonNegativeSafeInteger(progress.totalRows)
+    || !isNonNegativeSafeInteger(progress.completedBatches)
+    || !isNonNegativeSafeInteger(progress.totalBatches)
+    || progress.processedRows > progress.totalRows
+    || progress.completedBatches > progress.totalBatches) {
+    return undefined;
+  }
+  return {
+    runId: progress.runId,
+    step: progress.step,
+    processedRows: progress.processedRows,
+    totalRows: progress.totalRows,
+    completedBatches: progress.completedBatches,
+    totalBatches: progress.totalBatches,
   };
 }
 
@@ -533,6 +737,9 @@ function projectHistoryRun(run: HistoryRunDto): HistoryRunDto {
   return {
     ...projectRun(run),
     flowId: run.flowId,
+    flowName: run.flowName,
+    sourceDbName: run.sourceDbName,
+    targetDbName: run.targetDbName,
     flowVersion: run.flowVersion,
     startedAt: run.startedAt,
     endedAt: run.endedAt,
@@ -598,7 +805,8 @@ function projectRunError(error: RunErrorData): RunErrorDto {
       type: error.type,
       detail: {
         code: error.detail.code,
-        message: "Database operation failed; inspect the database server audit log",
+        message: safeConnectorDiagnostic(error.detail.code, error.detail.message)
+          ?? "Database operation failed; inspect the database server audit log",
         retryable: error.detail.retryable,
       },
     };
@@ -654,8 +862,12 @@ function publicDetailFor(code: string): string {
       return "credentials are unavailable";
     case "FLOW_NOT_FOUND":
       return "flow not found";
+    case "FLOW_FILE_INVALID":
+      return "flow file is invalid";
     case "RUN_NOT_FOUND":
       return "run not found";
+    case "TABLE_NAME_INVALID":
+      return "target table name is invalid";
     case "RECOVERY_NOT_AVAILABLE":
       return "recovery is unavailable";
     case "RECOVERY_CONFIG_MISMATCH":
@@ -687,8 +899,12 @@ function titleFor(code: string): string {
       return "Credentials unavailable";
     case "FLOW_NOT_FOUND":
       return "Flow not found";
+    case "FLOW_FILE_INVALID":
+      return "Invalid flow file";
     case "RUN_NOT_FOUND":
       return "Run not found";
+    case "TABLE_NAME_INVALID":
+      return "Invalid target table";
     case "RECOVERY_NOT_AVAILABLE":
       return "Recovery is unavailable";
     case "RECOVERY_CONFIG_MISMATCH":
@@ -710,6 +926,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function senderForProgress(event: unknown): {
+  send(channel: string, value: RunProgressDto): void;
+  isDestroyed?(): boolean;
+} | undefined {
+  if (!isRecord(event) || !isRecord(event.sender) || typeof event.sender.send !== "function") {
+    return undefined;
+  }
+  return event.sender as {
+    send(channel: string, value: RunProgressDto): void;
+    isDestroyed?(): boolean;
+  };
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!isRecord(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -722,6 +955,7 @@ function isSafeBoundaryError(
   return error instanceof IpcBoundaryError
     || error instanceof SettingsServiceError
     || error instanceof FlowServiceError
+    || error instanceof FlowTransferError
     || error instanceof MigrationRunnerError
     || error instanceof RepositoryError
     || error instanceof ConnectorError

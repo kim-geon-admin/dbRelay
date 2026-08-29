@@ -5,7 +5,7 @@ import { ConnectorError } from "./databaseConnector";
 import { OracleConnector } from "./oracleConnector";
 
 describe("OracleConnector", () => {
-  it("opens an Oracle SID profile through a SID connect descriptor", async () => {
+  it("opens an Oracle profile through an EZCONNECT service name", async () => {
     const { connector, driver } = fixture();
 
     const session = await connector.open(profile({
@@ -18,9 +18,42 @@ describe("OracleConnector", () => {
     expect(driver.getConnection).toHaveBeenCalledWith({
       user: "relay",
       password: "secret",
-      connectString: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example)(PORT=1521))(CONNECT_DATA=(SID=XE)))",
+      connectString: "db.example:1521/XE",
     });
     await session.close();
+  });
+
+  it("retries a missing service name as a SID", async () => {
+    const recoveredConnection = { close: vi.fn().mockResolvedValue(undefined) };
+    const { connector, driver } = fixture({
+      getConnection: vi.fn()
+        .mockRejectedValueOnce({ errorNum: 12514, message: "listener does not currently know of service requested" })
+        .mockResolvedValueOnce(recoveredConnection),
+    });
+
+    const session = await connector.open(profile({ sid: "ORCLPDB1" }), "secret");
+
+    expect(driver.getConnection).toHaveBeenNthCalledWith(1, {
+      user: "relay",
+      password: "secret",
+      connectString: "localhost:1521/ORCLPDB1",
+    });
+    expect(driver.getConnection).toHaveBeenNthCalledWith(2, {
+      user: "relay",
+      password: "secret",
+      connectString: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SID=ORCLPDB1)))",
+    });
+    await session.close();
+  });
+
+  it("does not retry as a SID after a non-service connection error", async () => {
+    const { connector, driver } = fixture({
+      getConnection: vi.fn().mockRejectedValue({ errorNum: 1017, message: "invalid username/password" }),
+    });
+
+    await expect(connector.open(profile(), "secret")).rejects.toMatchObject({ code: "ORA-01017" });
+
+    expect(driver.getConnection).toHaveBeenCalledOnce();
   });
 
   it("executes named batches with executeMany and explicit non-autocommit bind definitions", async () => {
@@ -52,6 +85,37 @@ describe("OracleConnector", () => {
       "BEGIN NULL; END;",
       2,
       { autoCommit: false, bindDefs: {} },
+    );
+    await session.close();
+  });
+
+  it("returns Oracle ROWIDs from a named DML returning batch", async () => {
+    const { connector, connection } = fixture({
+      executeMany: vi.fn().mockResolvedValue({
+        rowsAffected: 2,
+        outBinds: [
+          { DBR_RESTORE_ROWID: ["AAABBB"] },
+          { DBR_RESTORE_ROWID: ["AAABBC"] },
+        ],
+      }),
+    });
+    const session = await connector.open(profile(), "secret");
+
+    await expect(session.executeNamedReturningRowIds?.(
+      "INSERT INTO T (ID) VALUES (:ID) RETURNING ROWID INTO :DBR_RESTORE_ROWID",
+      [{ ID: 1 }, { ID: 2 }],
+    )).resolves.toEqual({ affectedRows: 2, rowIds: ["AAABBB", "AAABBC"] });
+
+    expect(connection.executeMany).toHaveBeenCalledWith(
+      "INSERT INTO T (ID) VALUES (:ID) RETURNING ROWID INTO :DBR_RESTORE_ROWID",
+      [{ ID: 1 }, { ID: 2 }],
+      {
+        autoCommit: false,
+        bindDefs: {
+          ID: { type: "DB_TYPE_NUMBER" },
+          DBR_RESTORE_ROWID: { type: "DB_TYPE_ROWID", dir: "BIND_OUT", maxSize: 200 },
+        },
+      },
     );
     await session.close();
   });
@@ -231,7 +295,11 @@ describe("OracleConnector", () => {
       session.executeNamed("MERGE INTO t USING :ID", [{ ID: 9_007_199_254_740_993n }]),
     );
 
-    expect(error).toMatchObject({ code: "BIND_TYPE_UNSUPPORTED" });
+    expect(error).toMatchObject({
+      code: "BIND_TYPE_UNSUPPORTED",
+      message: "bind-type-unsupported:ID:large_integer",
+    });
+    expect(error.message).not.toContain("9007199254740993");
     expect(connection.executeMany).not.toHaveBeenCalled();
     await session.close();
   });
@@ -325,6 +393,8 @@ function fixture(overrides: Record<string, unknown> = {}) {
     DB_TYPE_RAW: "DB_TYPE_RAW",
     DB_TYPE_TIMESTAMP: "DB_TYPE_TIMESTAMP",
     DB_TYPE_VARCHAR: "DB_TYPE_VARCHAR",
+    DB_TYPE_ROWID: "DB_TYPE_ROWID",
+    BIND_OUT: "BIND_OUT",
     getConnection: vi.fn().mockResolvedValue(connection),
     ...overrides,
   };

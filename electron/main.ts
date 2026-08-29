@@ -5,16 +5,20 @@ import {
   type Event as ElectronEvent,
   type WebContents,
 } from "electron";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { FlowService } from "./application/flowService";
+import { FlowTransferService } from "./application/flowTransferService";
+import { EditablePreviewCache } from "./application/editablePreviewCache";
 import { HistoryService } from "./application/historyService";
 import { MigrationRunner } from "./application/migrationRunner";
 import { SettingsService } from "./application/settingsService";
 import { OracleConnector } from "./connectors/oracleConnector";
 import { ConnectorRegistry } from "./connectors/registry";
 import { SqliteRepository } from "./infrastructure/sqliteRepository";
+import { ElectronFlowFileTransfer } from "./infrastructure/flowFileTransfer";
 import {
   isAllowedRendererUrl,
   isTrustedIpcSender,
@@ -26,6 +30,7 @@ const trustedRenderers = new Set<WebContents>();
 
 function createWindow(approvedUrl: string, devServerUrl: string | undefined) {
   const window = new BrowserWindow({
+    icon: join(__dirname, "../assets/db-relay-icon.ico"),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -60,7 +65,8 @@ app.whenReady().then(() => {
   registerDbRelayIpc(ipcMain, {
     settings: new SettingsService(repository),
     flows: new FlowService(repository),
-    runs: new MigrationRunner(connector, repository, repository),
+    flowTransfer: new FlowTransferService(repository, new ElectronFlowFileTransfer(), randomUUID),
+    runs: new MigrationRunner(connector, repository, repository, undefined, new EditablePreviewCache()),
     history: new HistoryService(repository),
     connectors: new ConnectorRegistry([connector]),
   }, (event) => isTrustedIpcSender(event, trustedRenderers, approvedUrl));

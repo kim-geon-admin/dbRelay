@@ -18,6 +18,9 @@ import type {
 } from "../domain/models";
 import { RunError, RunState } from "../domain/runState";
 import { validateSourceStatement, validateTargetStatement } from "../domain/sqlValidation";
+import { EditablePreviewCache } from "./editablePreviewCache";
+import { StepRestoreCache, type RestoreAction } from "./stepRestoreCache";
+import { parseRestorableDml } from "../domain/restorableDml";
 import type { FlowRepository, HistoryRepository, RunBinding } from "./ports";
 
 export interface CredentialResolver {
@@ -31,7 +34,21 @@ export interface RunDto {
   status: RunStatus;
   steps: StepStatus[];
   events: RunEvent[];
+  stepTitles: string[];
 }
+
+export type RunProgress = {
+  runId: string;
+  step: number;
+  processedRows: number;
+  totalRows: number;
+  completedBatches: number;
+  totalBatches: number;
+};
+
+export type RunProgressReporter = (progress: RunProgress) => void;
+
+const RUN_BATCH_SIZE = 1_000;
 
 export type RecoveryRequest =
   | {
@@ -61,12 +78,14 @@ export class MigrationRunner {
     private readonly flows: FlowRepository,
     private readonly history: HistoryRepository,
     private readonly credentials?: CredentialResolver,
+    private readonly editablePreviews = new EditablePreviewCache(),
+    private readonly stepRestores = new StepRestoreCache(),
   ) {}
 
   async previewFlowStep(input: {
     sourceConnectionId: string;
     selectSql: string;
-  }): Promise<{ columns: string[]; rows: NamedRow[] }> {
+  }): Promise<{ previewId: string; columns: string[]; rows: NamedRow[] }> {
     const sourceProfile = this.loadRunnableProfile(input.sourceConnectionId, "source");
     if (sourceProfile.kind !== this.connector.kind) {
       throw new MigrationRunnerError("CONNECTOR_KIND_MISMATCH", "connector kind does not match");
@@ -85,7 +104,15 @@ export class MigrationRunner {
       const sourceSecret = await this.resolveCredential(sourceProfile);
       source = await this.connector.open(sourceProfile, sourceSecret);
       const rowSet = await source.query(input.selectSql);
-      return { columns: rowSet.columns, rows: rowSet.rows };
+      return {
+        previewId: this.editablePreviews.create(
+          rowSet.columns,
+          rowSet.rows,
+          rowSet.unsupportedBindColumns,
+        ),
+        columns: rowSet.columns,
+        rows: rowSet.rows,
+      };
     } catch (error) {
       throw asMigrationRunnerError(error);
     } finally {
@@ -93,24 +120,27 @@ export class MigrationRunner {
     }
   }
 
+  saveEditedPreview(input: {
+    previewId: string;
+    columns: string[];
+    rows: NamedRow[];
+  }): void {
+    this.editablePreviews.save(input.previewId, input.columns, input.rows);
+  }
+
+  discardEditedPreview(previewId: string): void {
+    this.editablePreviews.discard(previewId);
+  }
+
   async runFlowStep(input: {
     sourceConnectionId: string;
     targetConnectionId: string;
     selectSql: string;
     upsertSql: string;
-  }): Promise<{ affectedRows: number }> {
-    if (input.sourceConnectionId === input.targetConnectionId) {
-      throw new MigrationRunnerError(
-        "CONNECTIONS_NOT_DISTINCT",
-        "source and target connections must be different",
-      );
-    }
-    const sourceProfile = this.loadRunnableProfile(input.sourceConnectionId, "source");
-    const targetProfile = this.loadRunnableProfile(input.targetConnectionId, "target");
-    if (sourceProfile.kind !== this.connector.kind || targetProfile.kind !== this.connector.kind) {
-      throw new MigrationRunnerError("CONNECTOR_KIND_MISMATCH", "connector kind does not match");
-    }
-
+    previewId?: string;
+    editorSessionId?: string;
+    stepId?: string;
+  }): Promise<{ affectedRows: number; restoreId?: string }> {
     const step: QueryStep = {
       id: "current-flow-step",
       selectSql: input.selectSql,
@@ -120,18 +150,48 @@ export class MigrationRunner {
     let target: DatabaseSession | undefined;
     let began = false;
     try {
+      const savedRows = input.previewId === undefined
+        ? undefined
+        : this.editablePreviews.consume(input.previewId);
+      const sourceProfile = savedRows === undefined
+        ? this.loadRunnableProfile(input.sourceConnectionId, "source")
+        : undefined;
+      const targetProfile = this.loadRunnableProfile(input.targetConnectionId, "target");
+      if ((sourceProfile !== undefined && sourceProfile.kind !== this.connector.kind)
+        || targetProfile.kind !== this.connector.kind) {
+        throw new MigrationRunnerError("CONNECTOR_KIND_MISMATCH", "connector kind does not match");
+      }
       validateStepPolicy(targetProfile, step);
-      const sourceSecret = await this.resolveCredential(sourceProfile);
       const targetSecret = await this.resolveCredential(targetProfile);
-      source = await this.connector.open(sourceProfile, sourceSecret);
+      if (sourceProfile !== undefined) {
+        const sourceSecret = await this.resolveCredential(sourceProfile);
+        source = await this.connector.open(sourceProfile, sourceSecret);
+      }
       target = await this.connector.open(targetProfile, targetSecret);
-      const batch = await prepareStepBatch(source, step);
+      const batch = savedRows === undefined
+        ? await prepareStepBatch(source!, step)
+        : prepareRowSetBatch(savedRows, step);
       validateTargetBatch(batch);
+      const plan = parseRestorableDml(step.upsertSql);
+      if (input.editorSessionId && input.stepId) this.stepRestores.discardStep(input.editorSessionId, input.stepId);
+      const before = plan === undefined || plan.kind === "insert" || target.queryNamed === undefined
+        ? undefined : await captureRestoreRows(target, plan.table, plan.keyTerms, plan.assignedColumns, batch);
       await target.begin();
       began = true;
-      const affectedRows = await target.executeNamed(step.upsertSql, batch);
+      const insertResult = plan?.kind === "insert" && target.executeNamedReturningRowIds !== undefined
+        ? await target.executeNamedReturningRowIds(sqlReturningRowId(step.upsertSql), batch)
+        : undefined;
+      const affectedRows = insertResult?.affectedRows ?? await target.executeNamed(step.upsertSql, batch);
+      const after = plan === undefined || plan.kind === "insert" || target.queryNamed === undefined
+        ? undefined : await captureRestoreRows(target, plan.table, plan.keyTerms, plan.assignedColumns, batch);
       await target.commit();
-      return { affectedRows };
+      const actions = plan === undefined ? [] : plan.kind === "insert"
+        ? insertRestoreActions(insertResult?.rowIds ?? [])
+        : restoreActions(plan.kind, plan.keyTerms, batch, before ?? [], after ?? []);
+      const restoreId = input.editorSessionId && input.stepId && actions.length > 0
+        ? this.stepRestores.create({ editorSessionId: input.editorSessionId, stepId: input.stepId,
+          targetConnectionId: input.targetConnectionId, table: plan!.table, actions }) : undefined;
+      return restoreId === undefined ? { affectedRows } : { affectedRows, restoreId };
     } catch (error) {
       if (began && target !== undefined) {
         const startedTarget = target;
@@ -143,24 +203,36 @@ export class MigrationRunner {
     }
   }
 
-  async startRun(flowId: string): Promise<RunDto> {
+  async restoreFlowStep(input: { restoreId: string }): Promise<{ affectedRows: number }> {
+    const restore = this.stepRestores.require(input.restoreId);
+    const profile = this.loadRunnableProfile(restore.targetConnectionId, "target");
+    let target: DatabaseSession | undefined;
+    let began = false;
+    try {
+      target = await this.connector.open(profile, await this.resolveCredential(profile));
+      await target.begin(); began = true;
+      let affectedRows = 0;
+      for (const action of restore.actions) affectedRows += await applyRestoreAction(target, restore.table, action);
+      if (affectedRows !== restore.actions.length) throw new MigrationRunnerError("RESTORE_CONFLICT", "target rows changed after run");
+      await target.commit();
+      this.stepRestores.discard(input.restoreId);
+      return { affectedRows };
+    } catch (error) {
+      if (began && target) await target.rollback().catch(() => undefined);
+      throw asMigrationRunnerError(error);
+    } finally { await closeSessions(target); }
+  }
+
+  discardStepRestore(restoreId: string): void { this.stepRestores.discard(restoreId); }
+  discardEditorRestores(editorSessionId: string): void { this.stepRestores.discardOwner(editorSessionId); }
+
+  async startRun(flowId: string, onProgress?: RunProgressReporter): Promise<RunDto> {
     const flow = this.flows.loadFlow(flowId);
     if (flow === undefined) {
       throw new MigrationRunnerError("FLOW_NOT_FOUND", "flow not found");
     }
     const runId = randomUUID();
 
-    if (flow.sourceConnectionId === flow.targetConnectionId) {
-      return this.createPreflightFailure(
-        runId,
-        flow,
-        0,
-        RunError.connector(
-          "CONNECTIONS_NOT_DISTINCT",
-          "source and target connections must be different",
-        ),
-      );
-    }
 
     let sourceProfile: ConnectionProfile | undefined;
     let targetProfile: ConnectionProfile | undefined;
@@ -225,12 +297,12 @@ export class MigrationRunner {
       try {
         source = await this.connector.open(sourceProfile, sourceSecret);
       } catch (error) {
-        return this.persistExistingPreflightFailure(runId, initialState, 0, portRunError(error));
+        return this.persistExistingPreflightFailure(runId, initialState, 0, portRunError(error), binding);
       }
       try {
         target = await this.connector.open(targetProfile, targetSecret);
       } catch (error) {
-        return this.persistExistingPreflightFailure(runId, initialState, 0, portRunError(error));
+        return this.persistExistingPreflightFailure(runId, initialState, 0, portRunError(error), binding);
       }
 
       const batches: NamedRow[][] = [];
@@ -238,7 +310,7 @@ export class MigrationRunner {
         try {
           batches.push(await preflightStep(source, targetProfile, flow.querySteps[index]));
         } catch (error) {
-          return this.persistExistingPreflightFailure(runId, initialState, index, asRunError(error));
+          return this.persistExistingPreflightFailure(runId, initialState, index, asRunError(error), binding);
         }
       }
       if (flow.transactionPolicy === "commit_successes") {
@@ -249,15 +321,16 @@ export class MigrationRunner {
           source,
           target,
           batches,
+          onProgress,
         );
       }
-      return await this.executeAllOrNothing(runId, flow, initialState, target, batches);
+      return await this.executeAllOrNothing(runId, binding, initialState, target, batches, onProgress);
     } finally {
       await closeSessions(target, source);
     }
   }
 
-  async recoverRun(request: RecoveryRequest): Promise<RunDto> {
+  async recoverRun(request: RecoveryRequest, onProgress?: RunProgressReporter): Promise<RunDto> {
     const state = this.history.loadRun(request.runId);
     if (state === undefined) {
       throw new MigrationRunnerError("RUN_NOT_FOUND", "run was not found");
@@ -295,12 +368,12 @@ export class MigrationRunner {
         binding,
         binding,
       );
-      return snapshot(request.runId, state);
+      return snapshot(request.runId, state, binding.flow);
     }
     if (request.type === "skip_and_continue") {
-      return this.skipAndContinue(request.runId, state, pausedState, binding);
+      return this.skipAndContinue(request.runId, state, pausedState, binding, onProgress);
     }
-    return this.editAndRetry(request, state, pausedState, binding, failedStep);
+    return this.editAndRetry(request, state, pausedState, binding, failedStep, onProgress);
   }
 
   private async skipAndContinue(
@@ -308,6 +381,7 @@ export class MigrationRunner {
     state: RunState,
     pausedState: RunState,
     binding: RunBinding,
+    onProgress?: RunProgressReporter,
   ): Promise<RunDto> {
     state.reserveRecovery("skip_and_continue");
     this.applyBoundRecovery(runId, state, pausedState, binding, binding);
@@ -315,7 +389,7 @@ export class MigrationRunner {
     state.applyReservedRecovery();
     if (state.status() === "completed") {
       this.applyBoundRecovery(runId, state, reservedState, binding, binding);
-      return snapshot(runId, state);
+      return snapshot(runId, state, binding.flow);
     }
     if (!isRunning(state.status())) {
       throw new MigrationRunnerError("RUN_STATE_INVALID", "recovery could not resume the run");
@@ -332,6 +406,8 @@ export class MigrationRunner {
         state,
         sessions.source,
         sessions.target,
+        undefined,
+        onProgress,
       );
     } finally {
       await closeSessions(sessions.target, sessions.source);
@@ -344,6 +420,7 @@ export class MigrationRunner {
     pausedState: RunState,
     binding: RunBinding,
     failedStep: number,
+    onProgress?: RunProgressReporter,
   ): Promise<RunDto> {
     if (!Number.isSafeInteger(binding.flow.version + 1)) {
       throw new MigrationRunnerError("FLOW_VERSION_INVALID", "flow version cannot be advanced");
@@ -389,6 +466,8 @@ export class MigrationRunner {
         state,
         sessions.source,
         sessions.target,
+        undefined,
+        onProgress,
       );
     } finally {
       await closeSessions(sessions.target, sessions.source);
@@ -397,20 +476,28 @@ export class MigrationRunner {
 
   private async executeAllOrNothing(
     runId: string,
-    flow: Flow,
+    binding: RunBinding,
     initialState: RunState,
     target: DatabaseSession,
     batches: readonly NamedRow[][],
+    onProgress?: RunProgressReporter,
   ): Promise<RunDto> {
     const state = initialState;
     try {
       await target.begin();
     } catch (error) {
-      return this.persistExistingPreflightFailure(runId, state, 0, portRunError(error));
+      return this.persistExistingPreflightFailure(runId, state, 0, portRunError(error), binding);
     }
-    for (let index = 0; index < flow.querySteps.length; index += 1) {
+    for (let index = 0; index < binding.flow.querySteps.length; index += 1) {
       try {
-        const affectedRows = await target.executeNamed(flow.querySteps[index].upsertSql, batches[index]);
+        const affectedRows = await executeStepBatches(
+          runId,
+          index,
+          binding.flow.querySteps[index].upsertSql,
+          batches[index],
+          target,
+          onProgress,
+        );
         state.recordStepSuccess(index, affectedRows);
       } catch (error) {
         state.recordStepFailure(index, executionRunError(error));
@@ -419,32 +506,32 @@ export class MigrationRunner {
         } catch (rollbackError) {
           state.markInDoubt(index, portRunError(rollbackError));
         }
-        this.history.appendRun(runId, state);
-        return snapshot(runId, state);
+        this.history.appendBoundRun(runId, state, binding);
+        return snapshot(runId, state, binding.flow);
       }
     }
-    if (flow.querySteps.length > 0) {
-      state.markCommitPending(flow.querySteps.length - 1);
-      this.history.appendRun(runId, state);
+    if (binding.flow.querySteps.length > 0) {
+      state.markCommitPending(binding.flow.querySteps.length - 1);
+      this.history.appendBoundRun(runId, state, binding);
     }
     try {
       await target.commit();
     } catch (error) {
-      const step = Math.max(0, flow.querySteps.length - 1);
+      const step = Math.max(0, binding.flow.querySteps.length - 1);
       state.markInDoubt(step, portRunError(error));
       try {
         await target.rollback();
       } catch (rollbackError) {
         state.markInDoubt(step, portRunError(rollbackError));
       }
-      this.history.appendRun(runId, state);
-      return snapshot(runId, state);
+      this.history.appendBoundRun(runId, state, binding);
+      return snapshot(runId, state, binding.flow);
     }
-    if (flow.querySteps.length > 0) {
+    if (binding.flow.querySteps.length > 0) {
       state.confirmPendingCommit();
     }
-    this.history.appendRun(runId, state);
-    return snapshot(runId, state);
+    this.history.appendBoundRun(runId, state, binding);
+    return snapshot(runId, state, binding.flow);
   }
 
   private async executeCommittedSteps(
@@ -454,11 +541,12 @@ export class MigrationRunner {
     source: DatabaseSession,
     target: DatabaseSession,
     preparedBatches?: readonly NamedRow[][],
+    onProgress?: RunProgressReporter,
   ): Promise<RunDto> {
     const currentStatus = state.status();
     if (currentStatus === "completed") {
       this.history.appendBoundRun(runId, state, binding);
-      return snapshot(runId, state);
+      return snapshot(runId, state, binding.flow);
     }
     if (!isRunning(currentStatus)) {
       throw new MigrationRunnerError(
@@ -478,7 +566,7 @@ export class MigrationRunner {
       } catch (error) {
         state.recordStepFailure(index, asRunError(error));
         this.history.appendBoundRun(runId, state, binding);
-        return snapshot(runId, state);
+        return snapshot(runId, state, binding.flow);
       }
 
       try {
@@ -495,7 +583,14 @@ export class MigrationRunner {
       }
       let affectedRows: number;
       try {
-        affectedRows = await target.executeNamed(step.upsertSql, batch);
+        affectedRows = await executeStepBatches(
+          runId,
+          index,
+          step.upsertSql,
+          batch,
+          target,
+          onProgress,
+        );
       } catch (error) {
         return this.rollbackCommittedFailure(
           runId,
@@ -523,7 +618,7 @@ export class MigrationRunner {
       state.recordStepSuccess(index, affectedRows);
       this.history.appendBoundRun(runId, state, binding);
     }
-    return snapshot(runId, state);
+    return snapshot(runId, state, binding.flow);
   }
 
   private async rollbackCommittedFailure(
@@ -546,7 +641,7 @@ export class MigrationRunner {
       state.markInDoubt(step, portRunError(rollbackError));
     }
     this.history.appendBoundRun(runId, state, binding);
-    return snapshot(runId, state);
+    return snapshot(runId, state, binding.flow);
   }
 
   private createPreflightFailure(
@@ -557,7 +652,7 @@ export class MigrationRunner {
   ): RunDto {
     const state = failedState(flow.transactionPolicy, flow.querySteps.length, stepIndex, error);
     this.history.createRunForFlow(runId, state, flow);
-    return snapshot(runId, state);
+    return snapshot(runId, state, flow);
   }
 
   private persistExistingPreflightFailure(
@@ -565,10 +660,12 @@ export class MigrationRunner {
     initialState: RunState,
     stepIndex: number,
     error: RunError,
+    binding?: RunBinding,
   ): RunDto {
     const state = failedState(initialState.policy(), initialState.steps().length, stepIndex, error);
-    this.history.appendRun(runId, state);
-    return snapshot(runId, state);
+    if (binding === undefined) this.history.appendRun(runId, state);
+    else this.history.appendBoundRun(runId, state, binding);
+    return snapshot(runId, state, binding?.flow);
   }
 
   private ensureRecoveryBinding(binding: RunBinding): void {
@@ -623,14 +720,13 @@ export class MigrationRunner {
     const state = cloneState(expectedState);
     state.returnReservedRecoveryToAwaiting();
     this.applyBoundRecovery(runId, state, expectedState, binding, binding);
-    return snapshot(runId, state);
+    return snapshot(runId, state, binding.flow);
   }
 
   private async tryOpenBoundSessions(
     binding: RunBinding,
   ): Promise<{ source: DatabaseSession; target: DatabaseSession } | undefined> {
-    if (binding.sourceProfile.id === binding.targetProfile.id
-      || binding.sourceProfile.kind !== this.connector.kind
+    if (binding.sourceProfile.kind !== this.connector.kind
       || binding.targetProfile.kind !== this.connector.kind) {
       return undefined;
     }
@@ -686,6 +782,33 @@ export class MigrationRunner {
   }
 }
 
+async function executeStepBatches(
+  runId: string,
+  step: number,
+  sql: string,
+  rows: readonly NamedRow[],
+  target: DatabaseSession,
+  onProgress?: RunProgressReporter,
+): Promise<number> {
+  const totalBatches = Math.ceil(rows.length / RUN_BATCH_SIZE);
+  let affectedRows = 0;
+  let processedRows = 0;
+  for (let offset = 0; offset < rows.length; offset += RUN_BATCH_SIZE) {
+    const batch = rows.slice(offset, offset + RUN_BATCH_SIZE);
+    affectedRows += await target.executeNamed(sql, batch);
+    processedRows += batch.length;
+    onProgress?.({
+      runId,
+      step,
+      processedRows,
+      totalRows: rows.length,
+      completedBatches: Math.ceil(processedRows / RUN_BATCH_SIZE),
+      totalBatches,
+    });
+  }
+  return affectedRows;
+}
+
 async function preflightStep(
   source: DatabaseSession,
   targetProfile: ConnectionProfile,
@@ -701,6 +824,10 @@ async function prepareStepBatch(source: DatabaseSession, step: QueryStep): Promi
   const rows = await source.query(step.selectSql).catch((error: unknown) => {
     throw sourceRunError(error);
   });
+  return prepareRowSetBatch(rows, step);
+}
+
+function prepareRowSetBatch(rows: RowSet, step: QueryStep): NamedRow[] {
   let binds: string[];
   try {
     binds = extractNamedBinds(step.upsertSql);
@@ -781,14 +908,93 @@ function failedState(
   return RunState.fromHistory(policy, "failed", steps, events);
 }
 
-function snapshot(runId: string, state: RunState): RunDto {
+function snapshot(runId: string, state: RunState, flow?: Flow): RunDto {
   return {
     runId,
     policy: state.policy(),
     status: state.status(),
     steps: state.steps().map((step) => step.status),
     events: [...state.events()],
+    stepTitles: flow === undefined ? [] : stepTitlesFor(flow),
   };
+}
+
+async function captureRestoreRows(
+  target: DatabaseSession,
+  table: string,
+  keyTerms: readonly { column: string; bindName: string }[],
+  columns: readonly string[],
+  rows: readonly NamedRow[],
+): Promise<NamedRow[]> {
+  if (target.queryNamed === undefined || rows.length === 0 || keyTerms.length === 0) return [];
+  const selection = ["ROWID AS DBR_RESTORE_ROWID", ...keyTerms.map((term) => term.column), ...columns]
+    .filter((column, index, values) => values.findIndex((value) => value.toUpperCase() === column.toUpperCase()) === index)
+    .join(", ");
+  const where = keyTerms.map((term) => `${term.column} = :${term.bindName}`).join(" AND ");
+  return (await target.queryNamed(`SELECT ${selection} FROM ${table} WHERE ${where}`, rows)).rows;
+}
+
+function restoreActions(
+  kind: "insert" | "update" | "upsert",
+  keyTerms: readonly { column: string; bindName: string }[],
+  source: readonly NamedRow[],
+  before: readonly NamedRow[],
+  after: readonly NamedRow[],
+): RestoreAction[] {
+  return source.flatMap<RestoreAction>((row) => {
+    const matches = (candidate: NamedRow) => keyTerms.every((term) => valueAt(candidate, term.column) === valueAt(row, term.bindName));
+    const prior = before.find(matches);
+    const current = after.find(matches);
+    if (current === undefined) return [];
+    const rowId = valueAt(current, "DBR_RESTORE_ROWID");
+    if (typeof rowId !== "string") return [];
+    const excluded = ["DBR_RESTORE_ROWID", ...keyTerms.map((term) => term.column)];
+    const expected = withoutKeys(current, excluded);
+    if (kind === "insert" || (kind === "upsert" && prior === undefined)) return [{ type: "delete", rowId, expected }];
+    if (prior === undefined) return [];
+    return [{ type: "update", rowId, expected, previous: withoutKeys(prior, excluded) }];
+  });
+}
+
+function insertRestoreActions(rowIds: readonly string[]): RestoreAction[] {
+  return rowIds.map((rowId) => ({ type: "delete" as const, rowId, expected: {} }));
+}
+
+function sqlReturningRowId(sql: string): string {
+  return `${sql.trim()} RETURNING ROWID INTO :DBR_RESTORE_ROWID`;
+}
+
+function withoutKeys(row: NamedRow, excluded: readonly string[]): NamedRow {
+  return Object.fromEntries(Object.entries(row).filter(([key]) => !excluded.some((item) => item.toUpperCase() === key.toUpperCase())));
+}
+
+function valueAt(row: NamedRow, key: string) {
+  return Object.entries(row).find(([name]) => name.toUpperCase() === key.toUpperCase())?.[1];
+}
+
+async function applyRestoreAction(target: DatabaseSession, table: string, action: RestoreAction): Promise<number> {
+  const expectedEntries = Object.entries(action.expected);
+  const expectedClause = expectedEntries.map(([column], index) =>
+    `(${column} = :DBR_EXPECTED_${index} OR (${column} IS NULL AND :DBR_EXPECTED_${index} IS NULL))`).join(" AND ");
+  const expectedBinds = Object.fromEntries(expectedEntries.map(([, value], index) =>
+    [`DBR_EXPECTED_${index}`, value]));
+  if (action.type === "delete") {
+    return target.executeNamed(`DELETE FROM ${table} WHERE ROWID = :DBR_RESTORE_ROWID${expectedClause ? ` AND ${expectedClause}` : ""}`, [{
+      DBR_RESTORE_ROWID: action.rowId,
+      ...expectedBinds,
+    }]);
+  }
+  const previousEntries = Object.entries(action.previous);
+  const sets = previousEntries.map(([column], index) => `${column} = :DBR_PREVIOUS_${index}`).join(", ");
+  return target.executeNamed(`UPDATE ${table} SET ${sets} WHERE ROWID = :DBR_RESTORE_ROWID${expectedClause ? ` AND ${expectedClause}` : ""}`, [{
+    DBR_RESTORE_ROWID: action.rowId,
+    ...Object.fromEntries(previousEntries.map(([, value], index) => [`DBR_PREVIOUS_${index}`, value])),
+    ...expectedBinds,
+  }]);
+}
+
+function stepTitlesFor(flow: Flow): string[] {
+  return flow.querySteps.map((step, position) => step.title?.trim() || `Step ${position + 1}`);
 }
 
 function cloneState(state: RunState): RunState {

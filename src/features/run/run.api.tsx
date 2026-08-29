@@ -1,5 +1,11 @@
-import { invokeCommand } from "../../lib/desktop";
+import { invokeCommand, subscribeToRunProgress, type RunProgressDto } from "../../lib/desktop";
 import type { RecoveryRequest, Run } from "./run.types";
+
+export type RunProgress = RunProgressDto;
+
+export function subscribeRunProgress(listener: (progress: RunProgress) => void): () => void {
+  return subscribeToRunProgress(listener);
+}
 
 export function startRun(flowId: string): Promise<Run> {
   return invokeCommand("start_run", { request: { flowId } });

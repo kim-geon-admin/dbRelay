@@ -30,12 +30,19 @@ interface OracleResult {
   metaData?: OracleMetadata[];
   rows?: unknown[];
   rowsAffected?: number;
+  outBinds?: Array<Record<string, unknown>>;
+}
+
+interface OracleBindDefinition {
+  type: OracleType;
+  maxSize?: number;
+  dir?: unknown;
 }
 
 interface OracleConnection {
   execute(
     sql: string,
-    binds: readonly unknown[],
+    binds: unknown,
     options: {
       outFormat: unknown;
       fetchTypeHandler: (metadata: OracleMetadata) => { type: OracleType } | undefined;
@@ -46,7 +53,7 @@ interface OracleConnection {
     rowsOrIterations: readonly Record<string, unknown>[] | number,
     options: {
       autoCommit: false;
-      bindDefs: Record<string, { type: OracleType; maxSize?: number }>;
+      bindDefs: Record<string, OracleBindDefinition>;
     },
   ): Promise<OracleResult>;
   commit(): Promise<void>;
@@ -62,6 +69,8 @@ export interface OracleDriver {
   readonly DB_TYPE_RAW: OracleType;
   readonly DB_TYPE_TIMESTAMP: OracleType;
   readonly DB_TYPE_VARCHAR: OracleType;
+  readonly DB_TYPE_ROWID?: OracleType;
+  readonly BIND_OUT?: unknown;
   readonly DB_TYPE_BINARY_INTEGER?: OracleType;
   readonly DB_TYPE_CHAR?: OracleType;
   readonly DB_TYPE_LONG?: OracleType;
@@ -90,14 +99,24 @@ export class OracleConnector implements DatabaseConnectorFactory {
       );
     }
     validateDescriptorPart(profile.host, "host");
-    validateDescriptorPart(profile.sid, "SID");
+    validateDescriptorPart(profile.sid, "service name");
 
     try {
-      const connection = await this.driver.getConnection({
+      const connectionOptions = {
         user: profile.username,
         password: secret,
-        connectString: sidDescriptor(profile.host, profile.port, profile.sid),
-      });
+        connectString: serviceNameConnectString(profile.host, profile.port, profile.sid),
+      };
+      let connection: OracleConnection;
+      try {
+        connection = await this.driver.getConnection(connectionOptions);
+      } catch (error) {
+        if (!shouldRetryWithSid(error)) throw error;
+        connection = await this.driver.getConnection({
+          ...connectionOptions,
+          connectString: sidDescriptor(profile.host, profile.port, profile.sid),
+        });
+      }
       return new OracleSession(this.driver, connection, secret);
     } catch (error) {
       throw connectorError(error, [secret]);
@@ -115,9 +134,24 @@ class OracleSession implements DatabaseSession {
   ) {}
 
   async query(sql: string) {
+    return this.queryWithBinds(sql, []);
+  }
+
+  async queryNamed(sql: string, rows: readonly NamedRow[]) {
+    if (rows.length === 0) return { columns: [], rows: [], unsupportedBindColumns: [] };
+    const bindNames = extractNamedBinds(sql);
+    const results = await Promise.all(rows.map((row) => this.queryWithBinds(sql, mapBindRow(row, bindNames))));
+    return {
+      columns: results[0]?.columns ?? [],
+      rows: results.flatMap((result) => result.rows),
+      unsupportedBindColumns: results[0]?.unsupportedBindColumns ?? [],
+    };
+  }
+
+  private async queryWithBinds(sql: string, binds: unknown) {
     this.requireOpen();
     try {
-      const result = await this.connection.execute(sql, [], {
+      const result = await this.connection.execute(sql, binds, {
         outFormat: this.driver.OUT_FORMAT_OBJECT,
         fetchTypeHandler: (metadata) => metadata.dbType === this.driver.DB_TYPE_NUMBER
           ? { type: this.driver.DB_TYPE_VARCHAR }
@@ -201,6 +235,51 @@ class OracleSession implements DatabaseSession {
     }
   }
 
+  async executeNamedReturningRowIds(
+    sql: string,
+    rows: readonly NamedRow[],
+  ): Promise<{ affectedRows: number; rowIds: string[] }> {
+    this.requireOpen();
+    if (rows.length === 0) return { affectedRows: 0, rowIds: [] };
+    if (this.driver.DB_TYPE_ROWID === undefined || this.driver.BIND_OUT === undefined) {
+      throw new ConnectorError("RETURNING_UNSUPPORTED", "Oracle ROWID returning is not available");
+    }
+
+    const outputBind = "DBR_RESTORE_ROWID";
+    let converted: Record<string, unknown>[];
+    let bindDefs: Record<string, OracleBindDefinition>;
+    try {
+      const bindNames = extractNamedBinds(sql);
+      if (!bindNames.some((name) => name.toUpperCase() === outputBind)) {
+        throw new ConnectorError("RETURNING_INVALID", "ROWID output bind was not found");
+      }
+      const inputBindNames = bindNames.filter((name) => name.toUpperCase() !== outputBind);
+      converted = rows.map((row) => mapBindRow(row, inputBindNames));
+      bindDefs = buildBindDefinitions(this.driver, inputBindNames, rows);
+      bindDefs[outputBind] = {
+        type: this.driver.DB_TYPE_ROWID,
+        dir: this.driver.BIND_OUT,
+        maxSize: 200,
+      };
+    } catch (error) {
+      if (error instanceof ConnectorError) throw error;
+      throw new ConnectorError("BIND_MAPPING", "unable to read named bind parameters");
+    }
+
+    try {
+      const result = await this.connection.executeMany(sql, converted, {
+        autoCommit: false,
+        bindDefs,
+      });
+      return {
+        affectedRows: result.rowsAffected ?? 0,
+        rowIds: returnedRowIds(result.outBinds, outputBind),
+      };
+    } catch (error) {
+      throw connectorError(error, [this.secret], true);
+    }
+  }
+
   async commit(): Promise<void> {
     this.requireOpen();
     try {
@@ -241,6 +320,14 @@ class OracleSession implements DatabaseSession {
 function sidDescriptor(host: string, port: number, sid: string): string {
   return `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${host})(PORT=${port}))`
     + `(CONNECT_DATA=(SID=${sid})))`;
+}
+
+function serviceNameConnectString(host: string, port: number, serviceName: string): string {
+  return `${host}:${port}/${serviceName}`;
+}
+
+function shouldRetryWithSid(error: unknown): boolean {
+  return new Set(["ORA-12505", "ORA-12514"]).has(oracleErrorCode(error));
 }
 
 function validateDescriptorPart(value: string, label: string): void {
@@ -377,6 +464,7 @@ function isSupportedColumnType(driver: OracleDriver, metadata: OracleMetadata): 
     driver.DB_TYPE_LONG_RAW,
     driver.DB_TYPE_NCHAR,
     driver.DB_TYPE_NVARCHAR,
+    driver.DB_TYPE_ROWID,
   ].some((supported) => supported !== undefined && supported === dbType);
 }
 
@@ -416,14 +504,28 @@ function mapBindRow(row: NamedRow, bindNames: readonly string[]): Record<string,
   return result;
 }
 
+function returnedRowIds(
+  outBinds: readonly Record<string, unknown>[] | undefined,
+  outputBind: string,
+): string[] {
+  if (outBinds === undefined) return [];
+  return outBinds.flatMap((entry) => {
+    const value = Object.entries(entry).find(([name]) =>
+      name.toUpperCase() === outputBind.toUpperCase())?.[1];
+    if (typeof value === "string") return [value];
+    if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+    return [];
+  });
+}
+
 function buildBindDefinitions(
   driver: OracleDriver,
   bindNames: readonly string[],
   rows: readonly NamedRow[],
-): Record<string, { type: OracleType; maxSize?: number }> {
+): Record<string, OracleBindDefinition> {
   const definitions = Object.create(null) as Record<
     string,
-    { type: OracleType; maxSize?: number }
+    OracleBindDefinition
   >;
   for (const bindName of bindNames) {
     const values = rows.map((row) => {
@@ -437,13 +539,14 @@ function buildBindDefinitions(
       }
       return entry[1];
     });
-    definitions[bindName] = bindDefinition(driver, values);
+    definitions[bindName] = bindDefinition(driver, bindName, values);
   }
   return definitions;
 }
 
 function bindDefinition(
   driver: OracleDriver,
+  bindName: string,
   values: readonly DomainValue[],
 ): { type: OracleType; maxSize?: number } {
   const nonNull = values.filter((value) => value !== null);
@@ -451,11 +554,14 @@ function bindDefinition(
     return { type: driver.DB_TYPE_VARCHAR, maxSize: 1 };
   }
   const kinds = new Set(nonNull.map(bindKind));
-  if (kinds.size !== 1 || kinds.has("unsupported")) {
+  if (kinds.size !== 1) {
     throw new ConnectorError(
       "BIND_TYPE_UNSUPPORTED",
-      "Oracle batch bind values must have one supported type per named parameter",
+      `bind-type-unsupported:${bindName}:mixed`,
     );
+  }
+  if (kinds.has("unsupported")) {
+    throw new ConnectorError("BIND_TYPE_UNSUPPORTED", `bind-type-unsupported:${bindName}:large_integer`);
   }
   switch ([...kinds][0]) {
     case "string":

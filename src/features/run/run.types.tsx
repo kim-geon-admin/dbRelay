@@ -14,6 +14,16 @@ export function statusKind(status: RunStatus): string {
   return typeof status === "string" ? status : Object.keys(status)[0] ?? "failed";
 }
 
+export function formatRunStatus(status: RunStatus): string {
+  return statusKind(status).replace(/_/g, " ");
+}
+
+export function formatRecoveryAction(action: Extract<RunEvent, { type: "recovery_applied" }>['action']): string {
+  if (action === "skip_and_continue") return "skipped by user";
+  if (action === "stop") return "stopped by user";
+  return "edit and retry";
+}
+
 export function failedStep(run: Run): number | undefined {
   return typeof run.status === "object" && "awaiting_recovery" in run.status
     ? run.status.awaiting_recovery.failed_step
@@ -26,6 +36,10 @@ export function stepKind(step: StepStatus): string {
 
 export function affectedRows(step: StepStatus): number {
   return typeof step === "object" && "succeeded" in step ? step.succeeded.affected_rows : 0;
+}
+
+export function stepLabel(stepTitles: readonly string[] | undefined, step: number): string {
+  return stepTitles?.[step]?.trim() || `Step ${step + 1}`;
 }
 
 export function recoveryFailure(run: Run, step: number) {

@@ -43,7 +43,11 @@ describe("HistoryService", () => {
     expect(runs).toEqual([expect.objectContaining({
       runId: "run-safe",
       flowId: "sensitive-flow",
+      flowName: "Sensitive flow",
+      sourceDbName: "Source database",
+      targetDbName: "Target database",
       flowVersion: 1,
+      stepTitles: ["Step 1"],
       startedAt: expect.any(Number),
       endedAt: null,
       policy: "commit_successes",
@@ -54,12 +58,16 @@ describe("HistoryService", () => {
       "endedAt",
       "events",
       "flowId",
+      "flowName",
       "flowVersion",
       "policy",
       "runId",
+      "sourceDbName",
       "startedAt",
       "status",
+      "stepTitles",
       "steps",
+      "targetDbName",
     ]);
     expect(JSON.stringify(runs)).not.toMatch(
       /password-source-value|password-target-value|password-error-value|SELECT secret_sql|MERGE secret_sql|source-row-value|bind-value|credential:\/\/sensitive/,
@@ -75,16 +83,42 @@ describe("HistoryService", () => {
 
     expect(runs[0]).toMatchObject({
       flowId: "",
+      sourceDbName: "",
+      targetDbName: "",
       flowVersion: 0,
       endedAt: null,
     });
+  });
+
+  it("deletes a terminal run from history", async () => {
+    const repository = SqliteRepository.inMemory();
+    repositories.push(repository);
+    const completed = RunState.running("all_or_nothing", 1);
+    completed.recordStepSuccess(0, 1);
+    repository.createRun("completed-run", completed);
+    const history = new HistoryService(repository);
+
+    await history.deleteRunHistory("completed-run");
+
+    await expect(history.listRunHistory()).resolves.toEqual([]);
+  });
+
+  it("retains a run that is awaiting recovery", async () => {
+    const repository = SqliteRepository.inMemory();
+    repositories.push(repository);
+    repository.createRun("awaiting-recovery", RunState.awaitingRecoveryAfterStep(0, 1));
+    const history = new HistoryService(repository);
+
+    await expect(history.deleteRunHistory("awaiting-recovery"))
+      .rejects.toMatchObject({ code: "RUN_NOT_DELETABLE" });
+    await expect(history.listRunHistory()).resolves.toHaveLength(1);
   });
 });
 
 function connection(id: "source" | "target", password: string): ConnectionProfile {
   return {
     id,
-    displayName: id,
+    displayName: id === "source" ? "Source database" : "Target database",
     kind: "oracle",
     host: "db.example.test",
     port: 1521,

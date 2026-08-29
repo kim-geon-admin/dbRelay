@@ -1,30 +1,31 @@
-import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { PreviewBigIntDto, PreviewBytesDto, PreviewCellDto, PreviewFlowStepDto } from "../../lib/desktop";
 
 type StepPreviewDialogProps = {
   preview: PreviewFlowStepDto;
   onClose: () => void;
+  onSave?: (edited: Pick<PreviewFlowStepDto, "columns" | "rows">) => Promise<void> | void;
 };
-
-function pad(value: number, length = 2) {
-  return String(value).padStart(length, "0");
-}
 
 function isTemporal(value: Exclude<PreviewCellDto, null>): value is {
   year: number; month: number; day: number; hour: number; minute: number; second: number;
   microsecond?: number; tzHourOffset?: number; tzMinuteOffset?: number;
 } {
-  return typeof value === "object" && !Array.isArray(value) && "year" in value && "month" in value
-    && "day" in value && "hour" in value && "minute" in value && "second" in value;
+  if (!(typeof value === "object" && value !== null && !Array.isArray(value) && "year" in value && "month" in value
+    && "day" in value && "hour" in value && "minute" in value && "second" in value)) return false;
+  const fields = [value.year, value.month, value.day, value.hour, value.minute, value.second];
+  if ("microsecond" in value) fields.push(value.microsecond, value.tzHourOffset, value.tzMinuteOffset);
+  return fields.every((field) => typeof field === "number" && Number.isInteger(field));
 }
 
 function isBytes(value: Exclude<PreviewCellDto, null>): value is PreviewBytesDto {
-  return typeof value === "object" && !Array.isArray(value) && "type" in value && value.type === "bytes"
+  return typeof value === "object" && value !== null && !Array.isArray(value) && "type" in value && value.type === "bytes"
     && "base64" in value && typeof value.base64 === "string";
 }
 
 function isBigInt(value: Exclude<PreviewCellDto, null>): value is PreviewBigIntDto {
-  return typeof value === "object" && !Array.isArray(value) && "type" in value && value.type === "bigint"
+  return typeof value === "object" && value !== null && !Array.isArray(value) && "type" in value && value.type === "bigint"
     && "decimal" in value && typeof value.decimal === "string";
 }
 
@@ -34,27 +35,73 @@ function byteLength(base64: string) {
   return (normalized.length / 4) * 3 - (normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0);
 }
 
-function previewCellText(value: PreviewCellDto | undefined): string {
-  if (value === null || value === undefined) return "NULL";
+function editableText(value: PreviewCellDto): string {
+  if (value === null) return "null";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return JSON.stringify(value);
   if (isBigInt(value)) return value.decimal;
-  if (isBytes(value)) {
-    const length = byteLength(value.base64);
-    return length === undefined ? "bytes" : `${length} bytes`;
-  }
-  if (isTemporal(value)) {
-    const date = `${pad(value.year, 4)}-${pad(value.month)}-${pad(value.day)} ${pad(value.hour)}:${pad(value.minute)}:${pad(value.second)}`;
-    if (value.microsecond === undefined) return date;
-    const sign = (value.tzHourOffset ?? 0) < 0 || (value.tzHourOffset === 0 && (value.tzMinuteOffset ?? 0) < 0) ? "-" : "+";
-    return `${date}.${pad(value.microsecond, 6)} ${sign}${pad(Math.abs(value.tzHourOffset ?? 0))}:${pad(Math.abs(value.tzMinuteOffset ?? 0))}`;
-  }
+  if (isBytes(value)) return value.base64;
   return JSON.stringify(value);
 }
 
-export function StepPreviewDialog({ preview, onClose }: StepPreviewDialogProps) {
+function samePreviewType(original: PreviewCellDto, value: unknown): value is PreviewCellDto {
+  if (original === null) return value === null;
+  if (typeof original === "string" || typeof original === "number" || typeof original === "boolean") {
+    return typeof value === typeof original && (typeof value !== "number" || Number.isFinite(value));
+  }
+  if (Array.isArray(original)) {
+    return Array.isArray(value) && original.length === value.length
+      && original.every((item, index) => samePreviewType(item, value[index]));
+  }
+  if (isBigInt(original)) return isBigInt(value as Exclude<PreviewCellDto, null>);
+  if (isBytes(original)) return isBytes(value as Exclude<PreviewCellDto, null>);
+  if (isTemporal(original)) {
+    return isTemporal(value as Exclude<PreviewCellDto, null>)
+      && ("microsecond" in original) === ("microsecond" in (value as Record<string, unknown>));
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const originalRecord = original as Record<string, PreviewCellDto>;
+  const nextRecord = value as Record<string, unknown>;
+  const keys = Object.keys(originalRecord);
+  return keys.length === Object.keys(nextRecord).length
+    && keys.every((key) => key in nextRecord && samePreviewType(originalRecord[key], nextRecord[key]));
+}
+
+function parsedValue(original: PreviewCellDto, text: string): PreviewCellDto | undefined {
+  if (typeof original === "string") return text;
+  if (typeof original === "number") {
+    const value = Number(text);
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof original === "boolean") return text === "true" ? true : text === "false" ? false : undefined;
+  if (original === null) return text === "null" ? null : undefined;
+  if (isBigInt(original)) return /^-?(?:0|[1-9][0-9]*)$/u.test(text) ? { type: "bigint", decimal: text } : undefined;
+  if (isBytes(original)) return byteLength(text) === undefined ? undefined : { type: "bytes", base64: text };
+  try {
+    const value: unknown = JSON.parse(text);
+    return samePreviewType(original, value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function StepPreviewDialog({ preview, onClose, onSave }: StepPreviewDialogProps) {
   const dialogRef = useRef<HTMLElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const [rows, setRows] = useState(() => preview.rows.map((row) => ({ ...row })));
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string>();
+  const [generateRowsOpen, setGenerateRowsOpen] = useState(false);
+  const [generateRowsDraft, setGenerateRowsDraft] = useState("");
+  const [generateRowsError, setGenerateRowsError] = useState<string>();
+  const [generatedRowStart, setGeneratedRowStart] = useState<number>();
+  const [autoFillColumn, setAutoFillColumn] = useState<string>();
+  const [drafts, setDrafts] = useState<Record<string, string>>(() => Object.fromEntries(
+    preview.rows.flatMap((row, rowIndex) => preview.columns.flatMap((column) => {
+      const value = row[column];
+      return value === undefined ? [] : [[`${rowIndex}:${column}`, editableText(value)] as const];
+    })),
+  ));
+  const [cellErrors, setCellErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     restoreFocusRef.current = document.activeElement instanceof HTMLElement
@@ -62,7 +109,7 @@ export function StepPreviewDialog({ preview, onClose }: StepPreviewDialogProps) 
       : null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    dialogRef.current?.querySelector<HTMLElement>("button:not([disabled])")?.focus();
+    dialogRef.current?.querySelector<HTMLElement>("button:last-of-type:not([disabled])")?.focus();
     return () => {
       document.body.style.overflow = previousOverflow;
       if (restoreFocusRef.current?.isConnected) restoreFocusRef.current.focus();
@@ -88,18 +135,130 @@ export function StepPreviewDialog({ preview, onClose }: StepPreviewDialogProps) 
     next?.focus();
   };
 
+  const save = async () => {
+    if (onSave === undefined || saving) return;
+    if (Object.keys(cellErrors).length > 0) {
+      setSaveError("The value must keep its original type.");
+      return;
+    }
+    setSaving(true);
+    setSaveError(undefined);
+    try {
+      await onSave({ columns: [...preview.columns], rows });
+    } catch {
+      setSaveError("Unable to save edited preview data.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeCell = (rowIndex: number, column: string, value: PreviewCellDto) => {
+    setRows((current) => current.map((row, index) => index === rowIndex
+      ? { ...row, [column]: value }
+      : row));
+  };
+
+  const generateRows = () => {
+    const count = Number(generateRowsDraft);
+    if (!Number.isSafeInteger(count) || count < 1 || count > 10000) {
+      setGenerateRowsError("1에서 10000 사이의 정수를 입력하세요.");
+      return;
+    }
+    const firstRow = rows[0];
+    if (firstRow === undefined) return;
+    const additions = Array.from({ length: count }, () => ({ ...firstRow }));
+    const startIndex = rows.length;
+    setGeneratedRowStart((current) => current ?? startIndex);
+    setRows((current) => [...current, ...additions]);
+    setDrafts((current) => ({
+      ...current,
+      ...Object.fromEntries(additions.flatMap((row, offset) => preview.columns.map((column) => [
+        `${startIndex + offset}:${column}`,
+        editableText(row[column]),
+      ]))),
+    }));
+    setGenerateRowsOpen(false);
+    setGenerateRowsDraft("");
+    setGenerateRowsError(undefined);
+  };
+
+  const canAutoFill = (column: string) => {
+    const firstValue = rows[0]?.[column];
+    return rows.length > 1 && (typeof firstValue === "string" || (typeof firstValue === "number" && Number.isFinite(firstValue)));
+  };
+
+  const autoFill = () => {
+    const column = autoFillColumn;
+    const firstValue = column === undefined ? undefined : rows[0]?.[column];
+    if (column === undefined || !(typeof firstValue === "string" || (typeof firstValue === "number" && Number.isFinite(firstValue)))) {
+      setAutoFillColumn(undefined);
+      return;
+    }
+    const firstChangedRow = typeof firstValue === "number" ? 1 : 0;
+    const values = rows.map((row, rowIndex) => typeof firstValue === "number"
+      ? firstValue + rowIndex
+      : `${row[column]}${rowIndex + 1}`);
+    setRows((current) => current.map((row, rowIndex) => rowIndex < firstChangedRow ? row : { ...row, [column]: values[rowIndex] }));
+    setDrafts((current) => ({
+      ...current,
+      ...Object.fromEntries(values.slice(firstChangedRow).map((value, rowIndex) => [`${rowIndex + firstChangedRow}:${column}`, String(value)])),
+    }));
+    setCellErrors((current) => {
+      const next = { ...current };
+      values.slice(firstChangedRow).forEach((_, rowIndex) => delete next[`${rowIndex + firstChangedRow}:${column}`]);
+      return next;
+    });
+    setAutoFillColumn(undefined);
+  };
+
+  const updateDraft = (rowIndex: number, column: string, draft: string) => {
+    const key = `${rowIndex}:${column}`;
+    setDrafts((current) => ({ ...current, [key]: draft }));
+    const original = preview.rows[rowIndex]?.[column] ?? preview.rows[0]?.[column];
+    const value = original === undefined ? undefined : parsedValue(original, draft);
+    if (value === undefined) {
+      setCellErrors((current) => ({ ...current, [key]: "The value must keep its original type." }));
+      return;
+    }
+    changeCell(rowIndex, column, value);
+    setCellErrors((current) => {
+      const { [key]: _error, ...remaining } = current;
+      return remaining;
+    });
+  };
+
   return <div className="step-preview-backdrop" role="presentation">
     <section ref={dialogRef} className="step-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="step-preview-title" onKeyDown={handleKeyDown}>
       <div className="step-preview-dialog__header">
+        {onSave ? <button type="button" onClick={() => void save()} disabled={saving}>{saving ? "Saving..." : "저장"}</button> : null}
         <h2 id="step-preview-title">미리보기</h2>
         <button type="button" onClick={onClose}>닫기</button>
       </div>
-      {preview.rows.length === 0 ? <p className="step-preview-dialog__empty">미리볼 행이 없습니다.</p> : <div className="step-preview-dialog__table-wrap">
-        <table>
-          <thead><tr>{preview.columns.map((column) => <th scope="col" key={column}>{column}</th>)}</tr></thead>
-          <tbody>{preview.rows.map((row, rowIndex) => <tr key={rowIndex}>{preview.columns.map((column) => <td key={column}>{previewCellText(row[column])}</td>)}</tr>)}</tbody>
+      {preview.rows.length === 0 ? <p className="step-preview-dialog__empty">미리볼 행이 없습니다.</p> : <div className="step-preview-dialog__table-wrap" data-testid="step-preview-table-scroll">
+        <table onDoubleClick={(event) => { const target = event.target; if (target instanceof HTMLTableCellElement && target.textContent?.trim() === "#") setGenerateRowsOpen(true); }}>
+          <thead><tr><th scope="col" className="step-preview-dialog__line-number">#</th>{preview.columns.map((column) => <th scope="col" key={column} className={canAutoFill(column) ? "step-preview-dialog__column-header" : undefined} title={canAutoFill(column) ? "더블 클릭하여 자동 채우기" : undefined} onDoubleClick={() => canAutoFill(column) && setAutoFillColumn(column)}>{column}</th>)}</tr></thead>
+          <tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}><th scope="row" className="step-preview-dialog__line-number">{rowIndex + 1}</th>{preview.columns.map((column) => {
+            const value = row[column];
+            const key = `${rowIndex}:${column}`;
+            const baseline = preview.rows[rowIndex]?.[column] ?? (rowIndex >= preview.rows.length ? preview.rows[0]?.[column] : undefined);
+            const changed = (generatedRowStart !== undefined && rowIndex >= generatedRowStart)
+              || JSON.stringify(value) !== JSON.stringify(baseline);
+            return <td key={column} data-testid={`preview-cell-${rowIndex}-${column}`} className={changed ? "step-preview-dialog__cell--changed" : undefined}>
+              <input aria-label={`${column} row ${rowIndex + 1}`} value={drafts[key] ?? (value === undefined ? "" : editableText(value))} aria-invalid={cellErrors[key] !== undefined} onChange={(event) => updateDraft(rowIndex, column, event.target.value)} />
+            </td>;
+          })}</tr>)}</tbody>
         </table>
       </div>}
+      {Object.values(cellErrors)[0] ?? saveError ? <p role="alert">{Object.values(cellErrors)[0] ?? saveError}</p> : null}
+      {autoFillColumn !== undefined ? <ConfirmDialog title="컬럼 자동 채우기" description="첫 번째 행 값을 기준으로 아래 행의 값을 자동으로 채우시겠습니까?" confirmLabel="자동 채우기" onCancel={() => setAutoFillColumn(undefined)} onConfirm={autoFill} /> : null}
+      {generateRowsOpen ? <div className="confirmation-backdrop" role="presentation"><section className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="generate-rows-title" aria-describedby="generate-rows-description" onKeyDown={handleKeyDown}>
+        <h2 id="generate-rows-title">데이터 행 생성</h2>
+        <p id="generate-rows-description">첫번째 ROW데이터로 몇개의 데이터를 생성하시겠습니까?</p>
+        <label htmlFor="generate-rows-count">생성할 개수</label>
+        <input id="generate-rows-count" type="number" min="1" max="10000" step="1" value={generateRowsDraft} onChange={(event) => { setGenerateRowsDraft(event.target.value); setGenerateRowsError(undefined); }} autoFocus />
+        {generateRowsError ? <p role="alert">{generateRowsError}</p> : null}
+        <div className="editor-actions confirmation-dialog__actions"><button type="button" onClick={() => { setGenerateRowsOpen(false); setGenerateRowsDraft(""); setGenerateRowsError(undefined); }}>취소</button><button type="button" className="confirmation-dialog__confirm" onClick={generateRows}>확인</button></div>
+      </section></div> : null}
     </section>
   </div>;
 }

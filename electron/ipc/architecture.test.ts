@@ -57,33 +57,49 @@ describe("Electron process boundaries", () => {
       "list_flows",
       "save_flow",
       "duplicate_flow",
+      "export_flow",
+      "delete_flow",
+      "import_flow",
       "preview_flow_step",
+      "save_edited_preview",
+      "discard_edited_preview",
       "run_flow_step",
+      "restore_flow_step",
+      "discard_step_restore",
+      "discard_editor_restores",
       "start_run",
       "recover_run",
       "list_run_history",
+      "delete_run_history",
+      "clear_run_history",
     ]);
     expect(DB_RELAY_COMMANDS.some((command) => /arbitrary|generic|execute.*sql/iu.test(command)))
       .toBe(false);
   });
 
-  it("limits source rows to the dedicated preview DTO and projection", () => {
+  it("limits source rows to dedicated editable-preview DTOs and projections", () => {
     const commands = readFileSync(resolve(workspace, "electron/ipc/commands.ts"), "utf8");
     const handlers = readFileSync(resolve(workspace, "electron/ipc/handlers.ts"), "utf8");
     const desktop = readFileSync(resolve(workspace, "src/lib/desktop.ts"), "utf8");
 
     expect(commands).toMatch(/export type PreviewFlowStepDto = \{[\s\S]*?rows:/u);
     expect(commands).toMatch(/preview_flow_step: PreviewFlowStepDto/u);
-    expect(commands).toMatch(/run_flow_step:\s*\{\s*affectedRows: number\s*\}/u);
+    expect(commands).toMatch(/save_edited_preview:[\s\S]*?rows:/u);
+    expect(commands).toMatch(/discard_edited_preview:[\s\S]*?previewId/u);
+    expect(commands).toMatch(/run_flow_step:\s*\{\s*affectedRows: number; restoreId\?: string\s*\}/u);
+    expect(commands).toMatch(/restore_flow_step:\s*\{\s*affectedRows: number\s*\}/u);
     const runDto = /export type RunDto = \{(?<body>[\s\S]*?)\n\};/u.exec(commands)?.groups?.body ?? "";
     const historyRunDto = /export type HistoryRunDto = RunDto & \{(?<body>[\s\S]*?)\n\};/u.exec(commands)?.groups?.body ?? "";
     expect(runDto).not.toMatch(/rows|binds|password|credential|selectSql|upsertSql/iu);
     expect(historyRunDto).not.toMatch(/rows|binds|password|credential|selectSql|upsertSql/iu);
     expect(handlers).toMatch(/case "preview_flow_step":[\s\S]*projectPreview/u);
+    expect(handlers).toMatch(/case "save_edited_preview":[\s\S]*decodePreviewRow/u);
+    expect(handlers).toMatch(/case "discard_edited_preview":[\s\S]*discardEditedPreview/u);
     expect(handlers).toMatch(/case "run_flow_step":[\s\S]*affectedRows/u);
     expect(desktop).toMatch(/type PreviewFlowStepDto = \{[\s\S]*?rows:/u);
     expect(desktop).toMatch(/preview_flow_step: PreviewFlowStepDto/u);
-    expect(desktop).toMatch(/run_flow_step:\s*\{\s*affectedRows: number\s*\}/u);
+    expect(desktop).toMatch(/save_edited_preview:[\s\S]*?rows:/u);
+    expect(desktop).toMatch(/run_flow_step:\s*\{\s*affectedRows: number; restoreId\?: string\s*\}/u);
   });
 
   it("limits renderer connection responses to passwordMask", () => {
@@ -95,14 +111,14 @@ describe("Electron process boundaries", () => {
     expect(connectionProjection).not.toMatch(/plaintext|credentialRef|\bsecret\b/iu);
   });
 
-  it("documents the preview-only source-row exception", () => {
+  it("documents the volatile editable-preview source-row exception", () => {
     const agents = readFileSync(resolve(workspace, "AGENTS.md"), "utf8");
     const architecture = readFileSync(resolve(workspace, "ARCHITECTURE.md"), "utf8");
     for (const document of [agents, architecture]) {
       const previewRules = /Preview-only source-row handling:[^\n]*/iu.exec(document)?.[0] ?? "";
-      expect(previewRules).toMatch(/preview_flow_step.*sole transient source-row exception/iu);
+      expect(previewRules).toMatch(/preview_flow_step.*save_edited_preview.*sole transient source-row exception/iu);
       expect(previewRules).toMatch(/source rows never enter logs, SQLite, history, or other DTOs/iu);
-      expect(previewRules).toMatch(/response.*renderer memory.*discarded.*modal closes/iu);
+      expect(previewRules).toMatch(/main-process memory.*renderer memory.*discarded.*modal closes.*editor unmount.*run attempt/iu);
       expect(previewRules).toMatch(/generic SQL.*prohibited/iu);
       expect(previewRules).toMatch(/passwords.*credentials.*target bind values.*excluded/iu);
     }

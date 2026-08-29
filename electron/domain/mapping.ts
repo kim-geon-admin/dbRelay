@@ -114,19 +114,14 @@ export function mapRow(row: SourceRow, bindNames: readonly string[]): NamedRow {
 }
 
 function isBindStart(character: string): boolean {
-  return isAsciiLetter(character) || character === "_";
+  return /^\p{L}$/u.test(character) || character === "_";
 }
 
 function isBindContinue(character: string): boolean {
   return isBindStart(character)
-    || isAsciiDigit(character)
+    || /^[\p{M}\p{Nd}]$/u.test(character)
     || character === "$"
     || character === "#";
-}
-
-function isAsciiLetter(character: string): boolean {
-  const code = character.charCodeAt(0);
-  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
 
 function isAsciiDigit(character: string): boolean {

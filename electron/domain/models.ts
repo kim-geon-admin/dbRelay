@@ -20,6 +20,7 @@ export type TransactionPolicy = "all_or_nothing" | "commit_successes";
 
 export interface QueryStep {
   id: string;
+  title?: string;
   selectSql: string;
   upsertSql: string;
 }

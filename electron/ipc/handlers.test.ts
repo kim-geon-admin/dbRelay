@@ -7,6 +7,7 @@ import { SettingsService } from "../application/settingsService";
 import { ConnectorRegistry } from "../connectors/registry";
 import type { DatabaseConnectorFactory } from "../connectors/databaseConnector";
 import type { ConnectionProfile, Flow } from "../domain/models";
+import { RunState } from "../domain/runState";
 import { SqliteRepository } from "../infrastructure/sqliteRepository";
 import type { DbRelayIpcResult } from "./commands";
 import {
@@ -29,6 +30,77 @@ describe("DB Relay command handler", () => {
     const { handler } = fixture();
 
     await expect(handler("list_connections")).resolves.toEqual([]);
+  });
+
+  it("saves an imported flow immediately when its connections are available", async () => {
+    const { services } = fixture();
+    const importedFlow: Flow = {
+      id: "imported-flow",
+      name: "Imported daily",
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      querySteps: [{
+        id: "step-1",
+        selectSql: "SELECT id FROM source_table",
+        upsertSql: "INSERT INTO target_table (id) VALUES (:id)",
+      }],
+      transactionPolicy: "all_or_nothing",
+      version: 0,
+    };
+    const handler = createDbRelayCommandHandler({
+      ...services,
+      flows: {
+        ...services.flows,
+        saveFlow: async (flow) => ({ ...flow, version: 1 }),
+      },
+      flowTransfer: {
+        exportFlow: async () => false,
+        importFlow: async () => ({ kind: "ready", flow: importedFlow }),
+      },
+    });
+
+    await expect(handler("import_flow")).resolves.toEqual({
+      status: "saved",
+      flow: { ...importedFlow, version: 1 },
+    });
+  });
+
+  it("returns run-time database and flow names with history entries", async () => {
+    const { handler, repository } = fixtureWithReferencedConnection();
+    repository.createBoundRun("run-daily", RunState.running("all_or_nothing", 0), {
+      flow: repository.loadFlow("daily")!,
+      sourceProfile: repository.loadConnection("source")!,
+      targetProfile: repository.loadConnection("target")!,
+    });
+
+    await expect(handler("list_run_history")).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-daily",
+        flowId: "daily",
+        flowName: "Daily",
+        sourceDbName: "source",
+        targetDbName: "target",
+      }),
+    ]);
+  });
+
+  it("deletes a terminal run through the typed history command", async () => {
+    const { handler, repository } = fixture();
+    repository.createRun("completed-run", RunState.running("all_or_nothing", 0));
+
+    await expect(handler("delete_run_history", {
+      request: { runId: "completed-run" },
+    })).resolves.toBeUndefined();
+    await expect(handler("list_run_history")).resolves.toEqual([]);
+  });
+
+  it("deletes a saved flow through the typed flow command", async () => {
+    const { handler, repository } = fixtureWithReferencedConnection();
+
+    await expect(handler("delete_flow", {
+      request: { flowId: "daily" },
+    })).resolves.toBeUndefined();
+    expect(repository.loadFlow("daily")).toBeUndefined();
   });
 
   it("rejects commands outside the main-process allowlist", async () => {
@@ -84,6 +156,7 @@ describe("DB Relay command handler", () => {
     // or dispatched a current step through an unrelated run operation.
     const { handler, services } = fixture();
     const previewFlowStep = vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      previewId: "preview-current-step",
       columns: ["ID"],
       rows: [{ ID: 1 }],
     });
@@ -91,7 +164,7 @@ describe("DB Relay command handler", () => {
 
     await expect(handler("preview_flow_step", {
       request: { sourceConnectionId: "source", selectSql: "SELECT id FROM t" },
-    })).resolves.toEqual({ columns: ["ID"], rows: [{ ID: 1 }] });
+    })).resolves.toEqual({ previewId: "preview-current-step", columns: ["ID"], rows: [{ ID: 1 }] });
     await expect(handler("run_flow_step", {
       request: {
         sourceConnectionId: "source",
@@ -116,11 +189,99 @@ describe("DB Relay command handler", () => {
     });
   });
 
+  it("forwards only safe batch progress from a started run", async () => {
+    // Would fail if a run progress callback was not wired through the typed
+    // handler or if the handler forwarded source/target execution details.
+    const { services } = fixture();
+    const emitProgress = vi.fn();
+    const handler = createDbRelayCommandHandler({
+      ...services,
+      runs: {
+        ...services.runs,
+        startRun: async (_flowId: string, onProgress?: (progress: unknown) => void) => {
+          onProgress?.({
+            runId: "run-progress", step: 0, processedRows: 1_000, totalRows: 2_001,
+            completedBatches: 1, totalBatches: 3, rows: [{ password: "private" }],
+          });
+          return { runId: "run-progress", policy: "all_or_nothing", status: "completed", steps: [], events: [] };
+        },
+      } as never,
+    }, emitProgress);
+
+    await handler("start_run", { request: { flowId: "flow-1" } });
+
+    expect(emitProgress).toHaveBeenCalledWith({
+      runId: "run-progress", step: 0, processedRows: 1_000, totalRows: 2_001,
+      completedBatches: 1, totalBatches: 3,
+    });
+    const progress = emitProgress.mock.calls[0][0] as Record<string, unknown>;
+    expect(progress).not.toHaveProperty("rows");
+    expect(progress).not.toHaveProperty("password");
+    expect(JSON.stringify(progress)).not.toContain("private");
+  });
+
+  it("accepts editable preview rows only through the dedicated save and discard commands", async () => {
+    // Would fail if editable source rows could use a generic command, if their
+    // preview token was omitted, or if the main process received DTO cells
+    // without converting them back to application values.
+    const { services } = fixture();
+    const saveEditedPreview = vi.fn();
+    const discardEditedPreview = vi.fn();
+    const handler = createDbRelayCommandHandler({
+      ...services,
+      runs: {
+        ...services.runs,
+        saveEditedPreview,
+        discardEditedPreview,
+      } as never,
+    });
+
+    await expect(handler("save_edited_preview", {
+      request: {
+        previewId: "preview-1",
+        columns: ["ID", "NAME"],
+        rows: [{ ID: 7, NAME: "edited" }],
+      },
+    } as never)).resolves.toBeUndefined();
+    await expect(handler("discard_edited_preview", {
+      request: { previewId: "preview-1" },
+    } as never)).resolves.toBeUndefined();
+    await expect(handler("save_edited_preview", {
+      request: {
+        previewId: "preview-1",
+        columns: ["ID"],
+        rows: [{ ID: Number.POSITIVE_INFINITY }],
+      },
+    } as never)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(handler("save_edited_preview", {
+      request: {
+        previewId: "preview-1",
+        columns: ["ID", "ID"],
+        rows: [{ ID: 7 }],
+      },
+    } as never)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(handler("save_edited_preview", {
+      request: {
+        previewId: "preview-1",
+        columns: ["ID", "NAME"],
+        rows: [{ ID: 7 }],
+      },
+    } as never)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+
+    expect(saveEditedPreview).toHaveBeenCalledWith({
+      previewId: "preview-1",
+      columns: ["ID", "NAME"],
+      rows: [{ ID: 7, NAME: "edited" }],
+    });
+    expect(discardEditedPreview).toHaveBeenCalledWith("preview-1");
+  });
+
   it("projects preview values to lossless JSON-safe cells", async () => {
     // Would fail if binary values, structured Oracle temporal values, or nested
     // JSON-safe preview values crossed IPC in a driver-specific shape.
     const { handler, services } = fixture();
     vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      previewId: "preview-projection",
       columns: ["BIG_ID", "DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
       rows: [{
         BIG_ID: 9_007_199_254_740_993n,
@@ -137,6 +298,7 @@ describe("DB Relay command handler", () => {
     await expect(handler("preview_flow_step", {
       request: { sourceConnectionId: "source", selectSql: "SELECT value FROM t" },
     })).resolves.toEqual({
+      previewId: "preview-projection",
       columns: ["BIG_ID", "DATE_VALUE", "TIMESTAMP_VALUE", "BYTES", "NESTED"],
       rows: [{
         BIG_ID: { type: "bigint", decimal: "9007199254740993" },
@@ -156,6 +318,7 @@ describe("DB Relay command handler", () => {
     // appeared in a cross-process error.
     const { handler, services } = fixture();
     vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      previewId: "preview-unsupported",
       columns: ["SECRET"],
       rows: [{ SECRET: Symbol("private-preview-value") } as never],
     });
@@ -179,6 +342,7 @@ describe("DB Relay command handler", () => {
     const cycle: Record<string, unknown> = {};
     cycle.self = cycle;
     vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      previewId: "preview-cycle",
       columns: ["VALUE"],
       rows: [{ VALUE: cycle } as never],
     });
@@ -197,6 +361,7 @@ describe("DB Relay command handler", () => {
     // source rows, or credential material instead of its summary.
     const { handler, services } = fixture();
     vi.spyOn(services.runs, "previewFlowStep").mockResolvedValue({
+      previewId: "preview-row-boundary",
       columns: ["ID"],
       rows: [{ ID: 1 }],
     });
@@ -218,7 +383,7 @@ describe("DB Relay command handler", () => {
       },
     });
 
-    expect(preview).toEqual({ columns: ["ID"], rows: [{ ID: 1 }] });
+    expect(preview).toEqual({ previewId: "preview-row-boundary", columns: ["ID"], rows: [{ ID: 1 }] });
     expect(run).toEqual({ affectedRows: 1 });
     expect(JSON.stringify(run)).not.toMatch(/"(?:rows|binds|password|credentialRef|selectSql)"/iu);
   });
@@ -420,6 +585,7 @@ describe("DB Relay command handler", () => {
       runId: "run-unsafe",
       policy: "commit_successes",
       status: { running: { step: 0 } },
+      stepTitles: [],
       steps: [{ succeeded: { affected_rows: 1 } }],
       events: [{
         type: "step_failed",
@@ -435,6 +601,43 @@ describe("DB Relay command handler", () => {
       }],
     });
     expect(JSON.stringify(response)).not.toMatch(/SELECT secret|binds=|rows=\[|private|password/u);
+  });
+
+  it("projects a safe Korean bind diagnostic without a bind value", async () => {
+    const { services } = fixture();
+    const handler = createDbRelayCommandHandler({
+      ...services,
+      runs: {
+        ...services.runs,
+        startRun: async () => ({
+          runId: "run-bind-type", policy: "all_or_nothing", status: "failed", steps: ["failed"],
+          stepTitles: [],
+          events: [{
+            type: "step_failed", step: 0,
+            error: {
+              type: "connector",
+              detail: {
+                code: "BIND_TYPE_UNSUPPORTED",
+                message: "bind-type-unsupported:CUSTOMER_ID:large_integer",
+                retryable: false,
+              },
+            },
+          }],
+        }),
+        recoverRun: services.runs.recoverRun.bind(services.runs),
+      },
+    });
+
+    await expect(handler("start_run", { request: { flowId: "flow-1" } })).resolves.toMatchObject({
+      events: [{
+        error: {
+          detail: {
+            code: "BIND_TYPE_UNSUPPORTED",
+            message: "바인드 :CUSTOMER_ID에 큰 정수 값이 있어 현재 실행할 수 없습니다.",
+          },
+        },
+      }],
+    });
   });
 
   it("registers one enveloped IPC endpoint with the same main allowlist", async () => {
@@ -545,6 +748,7 @@ describe("DB Relay command handler", () => {
       flows: {
         listFlows: services.flows.listFlows.bind(services.flows),
         duplicateFlow: services.flows.duplicateFlow.bind(services.flows),
+        deleteFlow: services.flows.deleteFlow.bind(services.flows),
         saveFlow: async (flow) => flow,
       },
     });
@@ -596,6 +800,10 @@ function fixture(): {
   const services: DbRelayServices = {
     settings: new SettingsService(repository),
     flows: new FlowService(repository),
+    flowTransfer: {
+      exportFlow: async () => false,
+      importFlow: async () => ({ kind: "cancelled" as const }),
+    },
     runs: new MigrationRunner(connector, repository, repository),
     history: new HistoryService(repository),
     connectors: new ConnectorRegistry([connector]),

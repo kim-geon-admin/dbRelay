@@ -15,7 +15,8 @@
     "better-sqlite3": "^13.0.3",
     "oracledb": "^6.2.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "sql-formatter": "^15.8.2"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",

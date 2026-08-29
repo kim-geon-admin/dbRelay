@@ -18,7 +18,180 @@ import {
   MigrationRunner,
   type CredentialResolver,
   type RecoveryRequest,
+  type RunProgress,
 } from "./migrationRunner";
+import { HistoryService } from "./historyService";
+
+type TargetOperation = "insert" | "update" | "upsert";
+
+const targetOperationCases: ReadonlyArray<{ name: TargetOperation }> = [
+  { name: "insert" },
+  { name: "update" },
+  { name: "upsert" },
+];
+
+type MultiStepScenario = {
+  name: string;
+  operations: readonly TargetOperation[];
+  transactions: readonly string[];
+};
+
+const allOrNothingSuccessScenarios: readonly MultiStepScenario[] = [
+  {
+    name: "three insert steps",
+    operations: ["insert", "insert", "insert"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "commit"],
+  },
+  {
+    name: "three upsert steps",
+    operations: ["upsert", "upsert", "upsert"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "commit"],
+  },
+  {
+    name: "one update, insert, and upsert step",
+    operations: ["update", "insert", "upsert"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "commit"],
+  },
+  {
+    name: "two insert, update, and upsert steps",
+    operations: ["insert", "insert", "update", "update", "upsert", "upsert"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "execute:3", "execute:4", "execute:5", "commit"],
+  },
+];
+
+const allOrNothingFailureScenarios: ReadonlyArray<MultiStepScenario & {
+  failureAt: number;
+  steps: readonly unknown[];
+}> = [
+  {
+    name: "three update steps failing at step 3",
+    operations: ["update", "update", "update"],
+    failureAt: 2,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "rollback"],
+  },
+  {
+    name: "three insert steps failing at step 3",
+    operations: ["insert", "insert", "insert"],
+    failureAt: 2,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "rollback"],
+  },
+  {
+    name: "three upsert steps failing at step 3",
+    operations: ["upsert", "upsert", "upsert"],
+    failureAt: 2,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "rollback"],
+  },
+  {
+    name: "six mixed steps failing at step 3",
+    operations: ["insert", "insert", "update", "update", "upsert", "upsert"],
+    failureAt: 2,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed", "not_run", "not_run", "not_run"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "rollback"],
+  },
+  {
+    name: "six mixed steps failing at step 6",
+    operations: ["insert", "insert", "update", "update", "upsert", "upsert"],
+    failureAt: 5,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin", "execute:0", "execute:1", "execute:2", "execute:3", "execute:4", "execute:5", "rollback"],
+  },
+];
+
+const committedSuccessScenarios: readonly MultiStepScenario[] = [
+  {
+    name: "three update steps",
+    operations: ["update", "update", "update"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "commit:2"],
+  },
+  {
+    name: "three insert steps",
+    operations: ["insert", "insert", "insert"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "commit:2"],
+  },
+  {
+    name: "three upsert steps",
+    operations: ["upsert", "upsert", "upsert"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "commit:2"],
+  },
+  {
+    name: "one update, insert, and upsert step",
+    operations: ["update", "insert", "upsert"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "commit:2"],
+  },
+  {
+    name: "two insert, update, and upsert steps",
+    operations: ["insert", "insert", "update", "update", "upsert", "upsert"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "commit:2", "begin:3", "execute:3", "commit:3", "begin:4", "execute:4", "commit:4", "begin:5", "execute:5", "commit:5"],
+  },
+];
+
+const committedFailureScenarios: ReadonlyArray<MultiStepScenario & {
+  failureAt: number;
+  steps: readonly unknown[];
+}> = [
+  {
+    name: "three update steps failing at step 3",
+    operations: ["update", "update", "update"],
+    failureAt: 2,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "rollback:2"],
+  },
+  {
+    name: "three insert steps failing at step 3",
+    operations: ["insert", "insert", "insert"],
+    failureAt: 2,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "rollback:2"],
+  },
+  {
+    name: "three upsert steps failing at step 3",
+    operations: ["upsert", "upsert", "upsert"],
+    failureAt: 2,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "rollback:2"],
+  },
+  {
+    name: "three mixed steps failing at step 2",
+    operations: ["update", "insert", "upsert"],
+    failureAt: 1,
+    steps: [{ succeeded: { affected_rows: 1 } }, "failed", "not_run"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "rollback:1"],
+  },
+  {
+    name: "six mixed steps failing at step 6",
+    operations: ["insert", "insert", "update", "update", "upsert", "upsert"],
+    failureAt: 5,
+    steps: [{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }, "failed"],
+    transactions: ["begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1", "begin:2", "execute:2", "commit:2", "begin:3", "execute:3", "commit:3", "begin:4", "execute:4", "commit:4", "begin:5", "execute:5", "rollback:5"],
+  },
+];
+
+const batchBoundaryCases = [
+  { label: "999 rows", rowCount: 999, chunkSizes: [999] },
+  { label: "1,000 rows", rowCount: 1_000, chunkSizes: [1_000] },
+  { label: "1,001 rows", rowCount: 1_001, chunkSizes: [1_000, 1] },
+  { label: "3,000 rows", rowCount: 3_000, chunkSizes: [1_000, 1_000, 1_000] },
+] as const;
+
+const batchedTargetOperationCases = batchBoundaryCases.flatMap((boundary) => (
+  targetOperationCases.map(({ name }) => ({ ...boundary, name }))
+));
+
+function targetSql(operation: TargetOperation, table: string, column: string): string {
+  const field = column.toLowerCase();
+  if (operation === "insert") return `INSERT INTO ${table} (${field}) VALUES (:${column})`;
+  if (operation === "update") return `UPDATE ${table} SET ${field} = :${column} WHERE ${field} = :${column}`;
+  return `MERGE INTO ${table} target USING dual ON (target.${field} = :${column}) WHEN MATCHED THEN UPDATE SET target.${field} = :${column} WHEN NOT MATCHED THEN INSERT (${field}) VALUES (:${column})`;
+}
+
+function configureOperationFlow(test: RunnerHarness, operation: TargetOperation): RunnerHarness {
+  return test
+    .stepSql(0, "SELECT id FROM customer", targetSql(operation, "customer", "ID"))
+    .stepSql(1, "SELECT address_id FROM address", targetSql(operation, "address", "ADDRESS_ID"));
+}
 
 describe("MigrationRunner", () => {
   const harnesses: RunnerHarness[] = [];
@@ -46,7 +219,11 @@ describe("MigrationRunner", () => {
       selectSql: "SELECT id FROM customers",
     });
 
-    expect(result).toEqual({ columns: ["ID"], rows: [{ ID: 1 }, { ID: 2 }] });
+    expect(result).toEqual({
+      previewId: expect.any(String),
+      columns: ["ID"],
+      rows: [{ ID: 1 }, { ID: 2 }],
+    });
     expect(test.repository.listRuns()).toEqual([]);
     expect(test.connector.targetOperations).toEqual([]);
     expect(test.connector.closedProfiles).toEqual(["source"]);
@@ -78,6 +255,58 @@ describe("MigrationRunner", () => {
     expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "commit"]);
     expect(test.repository.listRuns()).toEqual([]);
     expect(test.connector.closedProfiles).toEqual(["target", "source"]);
+  });
+
+  it("runs a saved preview without opening or querying the source", async () => {
+    const test = harness("all_or_nothing");
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT id FROM customer",
+    });
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["ID"],
+      rows: [{ ID: 7 }],
+    });
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: "MERGE INTO customer USING dual ON (id = :ID)",
+      previewId: preview.previewId,
+    })).resolves.toEqual({ affectedRows: 1 });
+
+    expect(test.connector.sourceQueries).toEqual(["customer"]);
+    expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "commit"]);
+    expect(test.connector.closedProfiles).toEqual(["source", "target"]);
+  });
+
+  it("discards a saved preview after a failed target run", async () => {
+    const test = harness("all_or_nothing").targetFailsAt(0);
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT id FROM customer",
+    });
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["ID"],
+      rows: [{ ID: 7 }],
+    });
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: "MERGE INTO customer USING dual ON (id = :ID)",
+      previewId: preview.previewId,
+    })).rejects.toMatchObject({ code: "FAKE_EXECUTE" });
+
+    expect(() => test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["ID"],
+      rows: [{ ID: 8 }],
+    })).toThrow(/preview/i);
   });
 
   it("rolls back the current step and retains the Oracle code", async () => {
@@ -141,6 +370,31 @@ describe("MigrationRunner", () => {
     expect(test.connector.sourceQueries).toEqual(["customer", "address"]);
     expect(test.repository.loadRun(result.runId)?.status()).toBe("rolled_back");
     expect(test.connector.closedProfiles).toEqual(["target", "source"]);
+  });
+
+  it("executes a large all-or-nothing step in 1,000-row chunks and reports safe progress", async () => {
+    // Would fail if target execution kept sending the whole step at once or
+    // if the renderer-facing progress callback exposed no batch boundaries.
+    const progress: RunProgress[] = [];
+    const test = harness("all_or_nothing").sourceRowsAt(0, numberedRowSet("ID", 2_001));
+
+    await test.runner.startRun(test.flowId, (update) => progress.push(update));
+
+    expect(test.connector.executedRowCounts).toEqual([1_000, 1_000, 1, 1]);
+    expect(progress.filter((update) => update.step === 0)).toEqual([
+      {
+        runId: expect.any(String), step: 0, processedRows: 1_000, totalRows: 2_001,
+        completedBatches: 1, totalBatches: 3,
+      },
+      {
+        runId: expect.any(String), step: 0, processedRows: 2_000, totalRows: 2_001,
+        completedBatches: 2, totalBatches: 3,
+      },
+      {
+        runId: expect.any(String), step: 0, processedRows: 2_001, totalRows: 2_001,
+        completedBatches: 3, totalBatches: 3,
+      },
+    ]);
   });
 
   it("persists an indeterminate run when all-or-nothing rollback fails", async () => {
@@ -260,18 +514,27 @@ describe("MigrationRunner", () => {
     expect(test.repository.historyJsonForTest(result.runId)).not.toContain(sourceValue);
   });
 
-  it("rejects identical source and target connections before connector work", async () => {
+  it("runs when source and target use the same connection", async () => {
     const test = harness("all_or_nothing");
-    const changed = test.repository.loadFlow(test.flowId)!;
-    changed.targetConnectionId = changed.sourceConnectionId;
     test.repository.database.prepare(
       "UPDATE flows SET target_connection_id = source_connection_id WHERE id = ?",
     ).run(test.flowId);
 
     const result = await test.runner.startRun(test.flowId);
 
-    expect(result.status).toBe("failed");
-    expect(test.connector.openedProfiles).toEqual([]);
+    expect(result.status).toBe("completed");
+    expect(test.connector.openedProfiles).toEqual(["source", "source"]);
+  });
+
+  it("runs a single step against the same source and target connection", async () => {
+    const test = harness("all_or_nothing");
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "source",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: "MERGE INTO customer USING dual ON (id = :ID)",
+    })).resolves.toEqual({ affectedRows: 0 });
   });
 
   it("allows a source profile without the legacy read-only flag", async () => {
@@ -295,6 +558,30 @@ describe("MigrationRunner", () => {
       "commit",
     ]);
     expect(test.connector.sourceQueries).toEqual(["customer", "address"]);
+  });
+
+  it("keeps the flow name in history after an all-or-nothing run", async () => {
+    const test = harness("all_or_nothing");
+    const titled = test.repository.loadFlow(test.flowId)!;
+    test.repository.saveFlow({
+      ...titled,
+      querySteps: titled.querySteps.map((step, index) => ({
+        ...step,
+        title: index === 0 ? "Load customers" : "Load addresses",
+      })),
+    });
+
+    const result = await test.runner.startRun(test.flowId);
+    const history = await new HistoryService(test.repository).listRunHistory();
+
+    expect(result.status).toBe("completed");
+    expect(history[0]).toMatchObject({
+      runId: result.runId,
+      flowId: test.flowId,
+      flowName: "Two step flow",
+      stepTitles: ["Load customers", "Load addresses"],
+    });
+    expect(result.stepTitles).toEqual(["Load customers", "Load addresses"]);
   });
 
   it("uses distinct opaque run IDs for repeated starts", async () => {
@@ -547,6 +834,477 @@ describe("MigrationRunner", () => {
     expect(credentials.stored).toContainEqual(["credential://source", "legacy-source"]);
     expect(test.connector.closedProfiles.slice(closesAfterStart)).toEqual(["target", "source"]);
   });
+
+  it.each(targetOperationCases)("runs $name steps in one all-or-nothing transaction", async ({ name }) => {
+    const test = configureOperationFlow(harness("all_or_nothing"), name);
+
+    const result = await test.runner.startRun(test.flowId);
+
+    expect(result.status).toBe("completed");
+    expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "execute:1", "commit"]);
+  });
+
+  it("commits all three update steps in one all-or-nothing transaction", async () => {
+    // Would fail if a three-step all-or-nothing run committed per step or
+    // omitted the final step from its single transaction.
+    const test = harness("all_or_nothing");
+    (test as unknown as {
+      configureOperationSteps: (operations: readonly TargetOperation[]) => RunnerHarness;
+    }).configureOperationSteps(["update", "update", "update"]);
+
+    const result = await test.runner.startRun(test.flowId);
+
+    expect(result.status).toBe("completed");
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin", "execute:0", "execute:1", "execute:2", "commit",
+    ]);
+  });
+
+  it.each(allOrNothingSuccessScenarios)(
+    "commits $name in one all-or-nothing transaction",
+    async ({ operations, transactions }) => {
+      const test = harness("all_or_nothing").configureOperationSteps(operations);
+
+      const result = await test.runner.startRun(test.flowId);
+
+      expect(result.status).toBe("completed");
+      expect(test.connector.targetTransactions()).toEqual(transactions);
+    },
+  );
+
+  it.each(allOrNothingFailureScenarios)(
+    "rolls back $name without committing earlier steps",
+    async ({ operations, failureAt, steps, transactions }) => {
+      const test = harness("all_or_nothing")
+        .configureOperationSteps(operations)
+        .targetFailsAt(failureAt);
+
+      const result = await test.runner.startRun(test.flowId);
+
+      expect(result.status).toBe("rolled_back");
+      expect(result.steps).toEqual(steps);
+      expect(test.connector.targetTransactions()).toEqual(transactions);
+    },
+  );
+
+  it.each(committedSuccessScenarios)(
+    "commits $name step by step under commit-successes",
+    async ({ operations, transactions }) => {
+      const test = harness("commit_successes").configureOperationSteps(operations);
+
+      const result = await test.runner.startRun(test.flowId);
+
+      expect(result.status).toBe("completed");
+      expect(test.connector.targetTransactions()).toEqual(transactions);
+    },
+  );
+
+  it.each(committedFailureScenarios)(
+    "preserves earlier commits for $name under commit-successes",
+    async ({ operations, failureAt, steps, transactions }) => {
+      const test = harness("commit_successes")
+        .configureOperationSteps(operations)
+        .targetFailsAt(failureAt);
+
+      const result = await test.runner.startRun(test.flowId);
+
+      expect(result.status).toEqual({ awaiting_recovery: { failed_step: failureAt } });
+      expect(result.steps).toEqual(steps);
+      expect(test.connector.targetTransactions()).toEqual(transactions);
+    },
+  );
+
+  it("skips a failed update step and commits the remaining third step", async () => {
+    // Would fail if skipping a failed step reran or rolled back the first commit,
+    // or if it did not continue to the remaining step.
+    const operations: readonly TargetOperation[] = ["update", "update", "update"];
+    const test = harness("commit_successes")
+      .configureOperationSteps(operations)
+      .targetFailsAt(1);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun({
+      type: "skip_and_continue",
+      runId: paused.runId,
+      stepId: "update-step-2",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.steps).toEqual([
+      { succeeded: { affected_rows: 1 } },
+      "skipped_by_user",
+      { succeeded: { affected_rows: 1 } },
+    ]);
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0",
+      "begin:1", "execute:1", "rollback:1",
+      "begin:2", "execute:2", "commit:2",
+    ]);
+  });
+
+  it("stops after a failed insert step without executing the remaining third step", async () => {
+    // Would fail if stop rolled back the first committed step or continued the run.
+    const operations: readonly TargetOperation[] = ["insert", "insert", "insert"];
+    const test = harness("commit_successes")
+      .configureOperationSteps(operations)
+      .targetFailsAt(1);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun({
+      type: "stop",
+      runId: paused.runId,
+      stepId: "insert-step-2",
+    });
+
+    expect(result.status).toBe("stopped_by_user");
+    expect(result.steps).toEqual([
+      { succeeded: { affected_rows: 1 } },
+      "failed",
+      "not_run",
+    ]);
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0",
+      "begin:1", "execute:1", "rollback:1",
+    ]);
+  });
+
+  it("edits and retries a failed upsert step before committing the remaining third step", async () => {
+    // Would fail if edit-and-retry reran the first committed step or did not use
+    // the user-supplied replacement SQL for the failed step.
+    const operations: readonly TargetOperation[] = ["upsert", "upsert", "upsert"];
+    const test = harness("commit_successes")
+      .configureOperationSteps(operations)
+      .targetFailsAt(1);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun(editRequestForOperationStep(
+      paused.runId,
+      operations,
+      1,
+    ));
+
+    expect(result.status).toBe("completed");
+    expect(result.steps).toEqual([
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+    ]);
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0",
+      "begin:1", "execute:1", "rollback:1",
+      "begin:2", "execute:2", "commit:2",
+      "begin:3", "execute:3", "commit:3",
+    ]);
+    expect(test.connector.executedSql[2]).toContain("revised_upsert_step_2");
+  });
+
+  it("edits a failed insert step in a mixed three-step flow and completes it", async () => {
+    const operations: readonly TargetOperation[] = ["update", "insert", "upsert"];
+    const test = harness("commit_successes")
+      .configureOperationSteps(operations)
+      .targetFailsAt(1);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun(editRequestForOperationStep(
+      paused.runId,
+      operations,
+      1,
+    ));
+
+    expect(result.status).toBe("completed");
+    expect(result.steps).toEqual([
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+    ]);
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0",
+      "begin:1", "execute:1", "rollback:1",
+      "begin:2", "execute:2", "commit:2",
+      "begin:3", "execute:3", "commit:3",
+    ]);
+    expect(test.connector.executedSql[2]).toContain("revised_insert_step_2");
+  });
+
+  it("edits a failed third step in a mixed six-step flow and commits every remaining step", async () => {
+    const operations: readonly TargetOperation[] = [
+      "insert", "insert", "update", "update", "upsert", "upsert",
+    ];
+    const test = harness("commit_successes")
+      .configureOperationSteps(operations)
+      .targetFailsAt(2);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun(editRequestForOperationStep(
+      paused.runId,
+      operations,
+      2,
+    ));
+
+    expect(result.status).toBe("completed");
+    expect(result.steps).toEqual([
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+      { succeeded: { affected_rows: 1 } },
+    ]);
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0",
+      "begin:1", "execute:1", "commit:1",
+      "begin:2", "execute:2", "rollback:2",
+      "begin:3", "execute:3", "commit:3",
+      "begin:4", "execute:4", "commit:4",
+      "begin:5", "execute:5", "commit:5",
+      "begin:6", "execute:6", "commit:6",
+    ]);
+    expect(test.connector.executedSql[3]).toContain("revised_update_step_3");
+  });
+
+  it.each(targetOperationCases)("rolls back all $name work when the later step fails", async ({ name }) => {
+    const test = configureOperationFlow(harness("all_or_nothing").targetFailsAt(1), name);
+
+    const result = await test.runner.startRun(test.flowId);
+
+    expect(result.status).toBe("rolled_back");
+    expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "execute:1", "rollback"]);
+  });
+
+  it.each(targetOperationCases)("commits every successful $name step independently", async ({ name }) => {
+    const test = configureOperationFlow(harness("commit_successes"), name);
+
+    const result = await test.runner.startRun(test.flowId);
+
+    expect(result.status).toBe("completed");
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "commit:1",
+    ]);
+  });
+
+  it.each(targetOperationCases)("awaits recovery when the first committed $name step fails", async ({ name }) => {
+    const test = configureOperationFlow(harness("commit_successes").targetFailsAt(0), name);
+
+    const result = await test.runner.startRun(test.flowId);
+
+    expect(result.status).toEqual({ awaiting_recovery: { failed_step: 0 } });
+    expect(test.connector.targetTransactions()).toEqual(["begin:0", "execute:0", "rollback:0"]);
+  });
+
+  it.each(targetOperationCases)("skips a later failed $name step without undoing an earlier commit", async ({ name }) => {
+    const test = configureOperationFlow(harness("commit_successes").targetFailsAt(1), name);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun({ type: "skip_and_continue", runId: paused.runId, stepId: "address" });
+
+    expect(result.status).toBe("completed");
+    expect(result.steps).toEqual([{ succeeded: { affected_rows: 1 } }, "skipped_by_user"]);
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "rollback:1",
+    ]);
+  });
+
+  it.each(targetOperationCases)("stops after a later failed $name step and preserves its earlier commit", async ({ name }) => {
+    const test = configureOperationFlow(harness("commit_successes").targetFailsAt(1), name);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun({ type: "stop", runId: paused.runId, stepId: "address" });
+
+    expect(result.status).toBe("stopped_by_user");
+    expect(result.steps[0]).toEqual({ succeeded: { affected_rows: 1 } });
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "rollback:1",
+    ]);
+  });
+
+  it.each(targetOperationCases)("retries a later failed $name step after editing it without rerunning the committed step", async ({ name }) => {
+    const test = configureOperationFlow(harness("commit_successes").targetFailsAt(1), name);
+    const paused = await test.runner.startRun(test.flowId);
+
+    const result = await test.runner.recoverRun(editRequest(paused.runId, {
+      selectSql: "SELECT address_id FROM revised_address",
+      upsertSql: targetSql(name, "revised_address", "ADDRESS_ID"),
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(result.steps).toEqual([{ succeeded: { affected_rows: 1 } }, { succeeded: { affected_rows: 1 } }]);
+    expect(test.connector.targetTransactions()).toEqual([
+      "begin:0", "execute:0", "commit:0", "begin:1", "execute:1", "rollback:1", "begin:2", "execute:2", "commit:2",
+    ]);
+    expect(test.connector.executedSql).toHaveLength(3);
+    expect(test.connector.executedSql[2]).toContain("revised_address");
+  });
+
+  it.each(targetOperationCases)("keeps the paused $name flow unchanged when its edit is invalid", async ({ name }) => {
+    const test = configureOperationFlow(harness("commit_successes").targetFailsAt(1), name);
+    const paused = await test.runner.startRun(test.flowId);
+    const before = test.repository.loadFlow(test.flowId);
+
+    const result = await test.runner.recoverRun(editRequest(paused.runId, { upsertSql: "DELETE FROM address" }));
+
+    expect(result.status).toEqual({ awaiting_recovery: { failed_step: 1 } });
+    expect(test.repository.loadFlow(test.flowId)).toEqual(before);
+  });
+
+  it.each(batchedTargetOperationCases)(
+    "runs $name with $label in all-or-nothing batches and reports every completed batch",
+    async ({ name, rowCount, chunkSizes }) => {
+      // Would fail if any boundary size were sent as a single target write, or
+      // if the run-progress callback missed a completed target batch.
+      const progress: RunProgress[] = [];
+      const test = configureOperationFlow(harness("all_or_nothing"), name)
+        .sourceRowsAt(0, numberedRowSet("ID", rowCount))
+        .sourceRowsAt(1, numberedRowSet("ADDRESS_ID", rowCount));
+
+      const result = await test.runner.startRun(test.flowId, (update) => progress.push(update));
+
+      expect(result.status).toBe("completed");
+      expect(result.steps).toEqual([
+        { succeeded: { affected_rows: rowCount } },
+        { succeeded: { affected_rows: rowCount } },
+      ]);
+      expect(test.connector.executedRowCounts).toEqual([...chunkSizes, ...chunkSizes]);
+      expect(test.connector.targetTransactions()).toEqual([
+        "begin",
+        ...Array.from({ length: chunkSizes.length * 2 }, (_, index) => `execute:${index}`),
+        "commit",
+      ]);
+      expect(progress.map((update) => ({
+        step: update.step,
+        processedRows: update.processedRows,
+        totalRows: update.totalRows,
+        completedBatches: update.completedBatches,
+        totalBatches: update.totalBatches,
+      }))).toEqual([
+        ...batchProgress(0, rowCount, chunkSizes),
+        ...batchProgress(1, rowCount, chunkSizes),
+      ]);
+    },
+  );
+
+  it.each(batchedTargetOperationCases)(
+    "rolls back all $name batches with $label when the later step fails",
+    async ({ name, rowCount, chunkSizes }) => {
+      // Would fail if the first step were committed, or if a later-step
+      // failure did not roll the transaction containing every completed batch back.
+      const test = configureOperationFlow(
+        harness("all_or_nothing").targetFailsAt(chunkSizes.length),
+        name,
+      )
+        .sourceRowsAt(0, numberedRowSet("ID", rowCount))
+        .sourceRowsAt(1, numberedRowSet("ADDRESS_ID", rowCount));
+
+      const result = await test.runner.startRun(test.flowId);
+
+      expect(result.status).toBe("rolled_back");
+      expect(test.connector.executedRowCounts).toEqual([...chunkSizes, chunkSizes[0]]);
+      expect(test.connector.targetTransactions()).toEqual([
+        "begin",
+        ...Array.from({ length: chunkSizes.length + 1 }, (_, index) => `execute:${index}`),
+        "rollback",
+      ]);
+    },
+  );
+
+  it.each(batchedTargetOperationCases)(
+    "preserves committed $name batches with $label and retries the edited failed step",
+    async ({ name, rowCount, chunkSizes }) => {
+      // Would fail if commit-successes rolled the first completed step back,
+      // or if edit-and-retry reran that committed step instead of only the failed one.
+      const progress: RunProgress[] = [];
+      const test = configureOperationFlow(
+        harness("commit_successes").targetFailsAt(chunkSizes.length),
+        name,
+      )
+        .sourceRowsAt(0, numberedRowSet("ID", rowCount))
+        .sourceRowsAt(1, numberedRowSet("ADDRESS_ID", rowCount));
+
+      const paused = await test.runner.startRun(test.flowId, (update) => progress.push(update));
+
+      expect(paused.status).toEqual({ awaiting_recovery: { failed_step: 1 } });
+      expect(paused.steps).toEqual([
+        { succeeded: { affected_rows: rowCount } },
+        "failed",
+      ]);
+      expect(test.connector.targetTransactions()).toEqual([
+        "begin:0",
+        ...Array.from({ length: chunkSizes.length }, (_, index) => `execute:${index}`),
+        `commit:${chunkSizes.length - 1}`,
+        `begin:${chunkSizes.length}`,
+        `execute:${chunkSizes.length}`,
+        `rollback:${chunkSizes.length}`,
+      ]);
+
+      const result = await test.runner.recoverRun(editRequest(paused.runId, {
+        selectSql: "SELECT address_id FROM revised_address",
+        upsertSql: targetSql(name, "revised_address", "ADDRESS_ID"),
+      }), (update) => progress.push(update));
+
+      expect(result.status).toBe("completed");
+      expect(result.steps).toEqual([
+        { succeeded: { affected_rows: rowCount } },
+        { succeeded: { affected_rows: rowCount } },
+      ]);
+      expect(test.connector.executedRowCounts).toEqual([
+        ...chunkSizes,
+        chunkSizes[0],
+        ...chunkSizes,
+      ]);
+      expect(test.connector.targetTransactions()).toEqual([
+        "begin:0",
+        ...Array.from({ length: chunkSizes.length }, (_, index) => `execute:${index}`),
+        `commit:${chunkSizes.length - 1}`,
+        `begin:${chunkSizes.length}`,
+        `execute:${chunkSizes.length}`,
+        `rollback:${chunkSizes.length}`,
+        `begin:${chunkSizes.length + 1}`,
+        ...Array.from(
+          { length: chunkSizes.length },
+          (_, index) => `execute:${chunkSizes.length + 1 + index}`,
+        ),
+        `commit:${chunkSizes.length * 2}`,
+      ]);
+      expect(test.connector.executedSql.slice(chunkSizes.length + 1).every((sql) => (
+        sql.includes("revised_address")
+      ))).toBe(true);
+      expect(progress.map((update) => ({
+        step: update.step,
+        processedRows: update.processedRows,
+        totalRows: update.totalRows,
+        completedBatches: update.completedBatches,
+        totalBatches: update.totalBatches,
+      }))).toEqual([
+        ...batchProgress(0, rowCount, chunkSizes),
+        ...batchProgress(1, rowCount, chunkSizes),
+      ]);
+    },
+  );
+
+  it.each(targetOperationCases)("runs the current unsaved $name step in its own transaction", async ({ name }) => {
+    const test = harness("all_or_nothing");
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: targetSql(name, "customer", "ID"),
+    })).resolves.toEqual({ affectedRows: 1 });
+
+    expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "commit"]);
+  });
+
+  it.each(targetOperationCases)("rolls back a failed current unsaved $name step", async ({ name }) => {
+    const test = harness("all_or_nothing").targetFailsAt(0);
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: targetSql(name, "customer", "ID"),
+    })).rejects.toMatchObject({ code: "FAKE_EXECUTE" });
+
+    expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "rollback"]);
+  });
 });
 
 class RunnerHarness {
@@ -613,6 +1371,25 @@ class RunnerHarness {
     return this;
   }
 
+  configureOperationSteps(operations: readonly TargetOperation[]): this {
+    const flow = this.repository.loadFlow(this.flowId)!;
+    this.repository.saveFlow({
+      ...flow,
+      querySteps: operations.map((operation, index) => {
+        const position = index + 1;
+        const column = `VALUE_${position}`;
+        const table = `${operation}_step_${position}`;
+        this.connector.sourceRows.set(index, rowSet(column, position));
+        return {
+          id: `${operation}-step-${position}`,
+          selectSql: `SELECT ${column} FROM ${table}`,
+          upsertSql: targetSql(operation, table, column),
+        };
+      }),
+    });
+    return this;
+  }
+
   withKeyringCredentials(credentials: CredentialResolver): this {
     for (const id of ["source", "target"] as const) {
       const profile = this.repository.loadConnection(id)!;
@@ -645,6 +1422,7 @@ class RecordingConnector implements DatabaseConnectorFactory {
   readonly synchronousCloseFailures = new Set<string>();
   readonly sourceQueries: string[] = [];
   readonly targetOperations: string[] = [];
+  readonly executedRowCounts: number[] = [];
   readonly executedSql: string[] = [];
   readonly openedProfiles: string[] = [];
   readonly closedProfiles: string[] = [];
@@ -672,12 +1450,18 @@ class RecordingConnector implements DatabaseConnectorFactory {
       query: async (sql): Promise<RowSet> => {
         const query = this.sourceQueryCount++;
         const label = sql.toLowerCase().includes("address") ? "address" : "customer";
+        const selectedColumn = /^\s*SELECT\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(sql)?.[1]?.toUpperCase();
         this.sourceQueries.push(label);
         const failure = this.sourceFailures.get(query);
         if (failure !== undefined) throw failure;
         const override = this.sourceRowsByQuery.get(query);
         if (override !== undefined) return structuredClone(override);
-        return structuredClone(this.sourceRows.get(label === "address" ? 1 : 0) ?? emptyRowSet());
+        return structuredClone(
+          this.sourceRows.get(query)
+          ?? (selectedColumn?.startsWith("VALUE_") ? rowSet(selectedColumn, query + 1) : undefined)
+          ?? this.sourceRows.get(label === "address" ? 1 : 0)
+          ?? emptyRowSet(),
+        );
       },
       begin: async () => undefined,
       executeNamed: async () => 0,
@@ -698,6 +1482,7 @@ class RecordingConnector implements DatabaseConnectorFactory {
       executeNamed: async (sql: string, rows: readonly NamedRow[]) => {
         const execution = this.targetExecuteCount++;
         this.executedSql.push(sql);
+        this.executedRowCounts.push(rows.length);
         this.targetOperations.push(`execute:${execution}`);
         const failure = this.targetFailures.get(execution);
         if (failure !== undefined) throw failure;
@@ -803,6 +1588,28 @@ function rowSet(column: string, value: DomainValue | Date): RowSet {
   };
 }
 
+function numberedRowSet(column: string, count: number): RowSet {
+  return {
+    columns: [column],
+    unsupportedBindColumns: [],
+    rows: Array.from({ length: count }, (_, index) => ({ [column]: index + 1 })),
+  };
+}
+
+function batchProgress(step: number, totalRows: number, chunkSizes: readonly number[]): Array<Omit<RunProgress, "runId">> {
+  let processedRows = 0;
+  return chunkSizes.map((size, index) => {
+    processedRows += size;
+    return {
+      step,
+      processedRows,
+      totalRows,
+      completedBatches: index + 1,
+      totalBatches: chunkSizes.length,
+    };
+  });
+}
+
 function emptyRowSet(): RowSet {
   return { columns: [], unsupportedBindColumns: [], rows: [] };
 }
@@ -818,5 +1625,23 @@ function editRequest(
     selectSql: "SELECT address_id FROM address",
     upsertSql: "MERGE INTO address USING dual ON (id = :ADDRESS_ID)",
     ...overrides,
+  };
+}
+
+function editRequestForOperationStep(
+  runId: string,
+  operations: readonly TargetOperation[],
+  failedStep: number,
+): Extract<RecoveryRequest, { type: "edit_and_retry" }> {
+  const operation = operations[failedStep]!;
+  const position = failedStep + 1;
+  const column = `VALUE_${position}`;
+  const table = `revised_${operation}_step_${position}`;
+  return {
+    type: "edit_and_retry",
+    runId,
+    stepId: `${operation}-step-${position}`,
+    selectSql: `SELECT ${column} FROM ${table}`,
+    upsertSql: targetSql(operation, table, column),
   };
 }

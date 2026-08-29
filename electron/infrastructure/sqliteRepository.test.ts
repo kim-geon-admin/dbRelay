@@ -64,6 +64,7 @@ describe("SqliteRepository connections and flows", () => {
     const saved = repository.loadFlow("daily");
     expect(saved).toMatchObject({ version: 1 });
     expect(saved?.querySteps.map((step) => step.id)).toEqual(["first", "second"]);
+    expect(saved?.querySteps.map((step) => step.title)).toEqual(["Step 1", "Step 2"]);
 
     repository.saveFlow({ ...saved!, name: "Daily updated" });
     expect(repository.loadFlow("daily")).toMatchObject({ name: "Daily updated", version: 2 });
@@ -106,6 +107,48 @@ describe("SqliteRepository connections and flows", () => {
 });
 
 describe("SqliteRepository run history", () => {
+  it("orders history by execution start time descending", () => {
+    const repository = openRepository();
+    repository.createRun("older", RunState.running("all_or_nothing", 1));
+    repository.createRun("newer", RunState.running("all_or_nothing", 1));
+    const database = (repository as unknown as { database: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).database;
+    database.prepare("UPDATE runs SET started_at_ms = ? WHERE id = ?").run(100, "older");
+    database.prepare("UPDATE runs SET started_at_ms = ? WHERE id = ?").run(200, "newer");
+    expect(repository.listRuns().map((run) => run.runId)).toEqual(["newer", "older"]);
+  });
+
+  it("round-trips a saved query-step title", () => {
+    const repository = openRepository();
+    repository.saveConnection(profile("source", "Source"));
+    repository.saveConnection(profile("target", "Target"));
+
+    repository.saveFlow({
+      ...flow("daily", 0),
+      querySteps: [{
+        id: "customers",
+        title: "Load customers",
+        selectSql: "SELECT id FROM customers",
+        upsertSql: "MERGE ordered_first",
+      }],
+    });
+
+    expect(repository.loadFlow("daily")?.querySteps).toMatchObject([{ title: "Load customers" }]);
+  });
+
+  it("recovers the flow name from the saved flow when legacy history lacks it", () => {
+    const repository = openRepository();
+    repository.saveConnection(profile("source", "Source"));
+    repository.saveConnection(profile("target", "Target"));
+    repository.saveFlow(flow("daily", 0));
+    repository.createRunForFlow("legacy-flow-name", RunState.running("all_or_nothing", 1), repository.loadFlow("daily")!);
+    const database = (repository as unknown as { database: { prepare: (sql: string) => { get: (...args: unknown[]) => { state_json: string }; run: (...args: unknown[]) => void } } }).database;
+    const stored = database.prepare("SELECT state_json FROM runs WHERE id = ?").get("legacy-flow-name");
+    const state = JSON.parse(stored.state_json) as Record<string, unknown>;
+    delete state.flow_name;
+    database.prepare("UPDATE runs SET state_json = ? WHERE id = ?").run(JSON.stringify(state), "legacy-flow-name");
+    expect(repository.listRuns()[0].flowName).toBe("Daily");
+  });
+
   it("stores only safe binding metadata and sanitized connector details", () => {
     const repository = openRepository();
     const source = profile("source", "Source");
@@ -167,6 +210,28 @@ describe("SqliteRepository run history", () => {
     expect(serialized).not.toContain("hunter2");
     expect(serialized).not.toContain("customer-123");
     expect(serialized).not.toContain("804f3c2a");
+  });
+
+  it("persists a safe Korean bind diagnostic without a bind value", () => {
+    const repository = openRepository();
+    const state = RunState.running("commit_successes", 1);
+    state.recordStepFailure(0, RunError.connector(
+      "BIND_TYPE_UNSUPPORTED",
+      "bind-type-unsupported:CUSTOMER_ID:large_integer",
+    ));
+
+    repository.createRun("safe-bind-diagnostic", state);
+
+    const event = repository.listRuns()[0].state.events()[0];
+    expect(event).toMatchObject({
+      error: {
+        detail: {
+          code: "BIND_TYPE_UNSUPPORTED",
+          message: "바인드 :CUSTOMER_ID에 큰 정수 값이 있어 현재 실행할 수 없습니다.",
+        },
+      },
+    });
+    expect(repository.historyJsonForTest("safe-bind-diagnostic")).not.toContain("9007199254740993");
   });
 });
 

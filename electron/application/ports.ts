@@ -17,6 +17,7 @@ export interface FlowRepository extends Pick<
 > {
   loadFlow(flowId: string): Flow | undefined;
   saveFlow(flow: Flow): void;
+  deleteFlow(flowId: string): void;
   listFlows(): Flow[];
 }
 
@@ -29,7 +30,11 @@ export interface RunBinding {
 export interface RunHistoryEntry {
   runId: string;
   flowId?: string;
+  flowName?: string;
+  sourceDbName?: string;
+  targetDbName?: string;
   flowVersion?: number;
+  stepTitles?: string[];
   startedAtMs: number;
   endedAtMs?: number;
   state: RunState;
@@ -48,6 +53,8 @@ export interface HistoryRepository {
   appendBoundRun(runId: string, state: RunState, binding: RunBinding): void;
   loadRun(runId: string): RunState | undefined;
   listRuns(): RunHistoryEntry[];
+  deleteRun(runId: string): boolean;
+  clearRuns(): number;
   loadRunBinding(runId: string): RunBinding | undefined;
   applyBoundRecovery(
     runId: string,

@@ -118,6 +118,7 @@ export class RunError extends Error {
     switch (this.value.type) {
       case "connector":
         return /^ORA-[0-9]{5}$/i.test(this.value.detail.code)
+          || this.value.detail.code === "BIND_TYPE_UNSUPPORTED"
           ? this.value.detail.code.toUpperCase()
           : "CONNECTOR_ERROR";
       case "invalid_transition":

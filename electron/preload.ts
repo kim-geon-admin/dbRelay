@@ -2,16 +2,23 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import {
   DB_RELAY_CHANNEL,
+  DB_RELAY_RUN_PROGRESS_CHANNEL,
   type CommandArguments,
   type CommandErrorDto,
   type CommandResponseMap,
   type DbRelayApi,
   type DbRelayCommand,
   type DbRelayIpcResult,
+  type RunProgressDto,
   isDbRelayCommand,
 } from "./ipc/commands";
 
 type IpcInvoke = (channel: string, command: string, request?: unknown) => Promise<unknown>;
+
+type IpcProgressRenderer = {
+  on(channel: string, listener: (event: unknown, progress: unknown) => void): unknown;
+  removeListener(channel: string, listener: (event: unknown, progress: unknown) => void): unknown;
+};
 
 export function isAllowedCommand(command: string): boolean {
   return isDbRelayCommand(command);
@@ -51,12 +58,29 @@ export async function invokeDbRelayCommand(
   return result.value;
 }
 
+export function subscribeRunProgress(
+  progressRenderer: IpcProgressRenderer,
+  listener: (progress: RunProgressDto) => void,
+): () => void {
+  const receive = (_event: unknown, value: unknown) => {
+    const progress = parseRunProgress(value);
+    if (progress !== undefined) listener(progress);
+  };
+  progressRenderer.on(DB_RELAY_RUN_PROGRESS_CHANNEL, receive);
+  return () => {
+    progressRenderer.removeListener(DB_RELAY_RUN_PROGRESS_CHANNEL, receive);
+  };
+}
+
 const dbRelay: DbRelayApi = {
   invoke<Command extends DbRelayCommand>(
     command: Command,
     ...args: CommandArguments<Command>
   ): Promise<CommandResponseMap[Command]> {
     return invokeDbRelayCommand(ipcRenderer.invoke.bind(ipcRenderer), command, ...args);
+  },
+  subscribeRunProgress(listener: (progress: RunProgressDto) => void): () => void {
+    return subscribeRunProgress(ipcRenderer, listener);
   },
 };
 
@@ -83,6 +107,35 @@ function isCommandError(value: unknown): value is CommandErrorDto {
     && typeof value.detail === "string"
     && "code" in value
     && typeof value.code === "string";
+}
+
+function parseRunProgress(value: unknown): RunProgressDto | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const progress = value as Record<string, unknown>;
+  const keys = ["runId", "step", "processedRows", "totalRows", "completedBatches", "totalBatches"];
+  if (Object.keys(progress).length !== keys.length || !keys.every((key) => key in progress)
+    || typeof progress.runId !== "string" || progress.runId.length === 0
+    || !isNonNegativeSafeInteger(progress.step)
+    || !isNonNegativeSafeInteger(progress.processedRows)
+    || !isNonNegativeSafeInteger(progress.totalRows)
+    || !isNonNegativeSafeInteger(progress.completedBatches)
+    || !isNonNegativeSafeInteger(progress.totalBatches)
+    || progress.processedRows > progress.totalRows
+    || progress.completedBatches > progress.totalBatches) {
+    return undefined;
+  }
+  return {
+    runId: progress.runId,
+    step: progress.step,
+    processedRows: progress.processedRows,
+    totalRows: progress.totalRows,
+    completedBatches: progress.completedBatches,
+    totalBatches: progress.totalBatches,
+  };
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function commandNotAllowed(): CommandErrorDto {

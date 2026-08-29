@@ -8,11 +8,23 @@ import {
   testConnection,
 } from "./connections.api";
 import type { Connection, ConnectionSaveInput } from "./connections.types";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
+import { formatConnectorError } from "../../lib/oracleErrors";
+
+function connectionTestErrorDetail(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error && "detail" in error
+    && typeof error.code === "string" && typeof error.detail === "string") {
+    return formatConnectorError(error.code, error.detail);
+  }
+  return "CONNECTION_ERROR: A safe connection error detail is unavailable.";
+}
 
 export function ConnectionList() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [editing, setEditing] = useState<Connection | null | undefined>(undefined);
+  const [pendingDeletion, setPendingDeletion] = useState<Connection>();
   const [notice, setNotice] = useState<string>();
+  const [connectionTestError, setConnectionTestError] = useState<string>();
 
   const refresh = async () => setConnections(await listConnections());
 
@@ -30,9 +42,11 @@ export function ConnectionList() {
   const test = async (connection: Connection) => {
     try {
       await testConnection(connection.id);
+      setConnectionTestError(undefined);
       setNotice(`${connection.displayName} connected successfully.`);
-    } catch {
+    } catch (error) {
       setNotice(`${connection.displayName} could not be connected.`);
+      setConnectionTestError(connectionTestErrorDetail(error));
     }
   };
 
@@ -61,10 +75,6 @@ export function ConnectionList() {
   };
 
   const remove = async (connection: Connection) => {
-    if (!window.confirm(`Delete ${connection.displayName}? This cannot be undone.`)) {
-      return;
-    }
-
     try {
       await deleteConnection(connection.id);
       setConnections((currentConnections) =>
@@ -74,7 +84,7 @@ export function ConnectionList() {
       const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
 
       if (code === "CONNECTION_REFERENCED") {
-        setNotice("This connection is used by a flow and cannot be deleted.");
+        setNotice("flow에서 사용중이라 삭제할 수 없습니다.");
         return;
       }
 
@@ -100,7 +110,8 @@ export function ConnectionList() {
         <button onClick={() => setEditing(null)}>New connection</button>
       </div>
       {notice ? <p role="status">{notice}</p> : null}
-      {editing !== undefined ? (
+      {connectionTestError ? <p role="alert">{connectionTestError}</p> : null}
+      {editing === null ? (
         <ConnectionForm
           connection={editing ?? undefined}
           onSave={save}
@@ -110,15 +121,15 @@ export function ConnectionList() {
       <ul className="connection-list">
         {connections.map((connection) => (
           <li key={connection.id} className="connection-card">
-            <div>
+            <div className="connection-card__details">
               <strong>{connection.displayName}</strong>
               <p>
                 {connection.kind.toUpperCase()} · {connection.host}:{connection.port}/{connection.sid}
               </p>
             </div>
-            <span>{connection.enabled ? "Enabled" : "Disabled"}</span>
-            <div className="editor-actions">
-              <button className="connection-card__action" onClick={() => setEditing(connection)}>
+            <span className="connection-card__status">{connection.enabled ? "Enabled" : "Disabled"}</span>
+            <div className="editor-actions connection-card__actions">
+              <button className="connection-card__action" onClick={() => setEditing((current) => current?.id === connection.id ? undefined : connection)}>
                 Edit
               </button>
               <button
@@ -134,13 +145,21 @@ export function ConnectionList() {
               >
                 {connection.enabled ? "Disable" : "Enable"}
               </button>
-              <button className="connection-card__action" onClick={() => void remove(connection)}>
+              <button className="connection-card__action" onClick={() => setPendingDeletion(connection)}>
                 Delete
               </button>
             </div>
+            {editing?.id === connection.id ? (
+              <ConnectionForm
+                connection={connection}
+                onSave={save}
+                onCancel={() => setEditing(undefined)}
+              />
+            ) : null}
           </li>
         ))}
       </ul>
+      {pendingDeletion ? <ConfirmDialog title="DB 설정 삭제" description={`“${pendingDeletion.displayName}” DB 설정을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`} confirmLabel="삭제" onCancel={() => setPendingDeletion(undefined)} onConfirm={() => { const connection = pendingDeletion; setPendingDeletion(undefined); void remove(connection); }} /> : null}
     </section>
   );
 }

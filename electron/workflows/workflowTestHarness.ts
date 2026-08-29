@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FlowService } from "../application/flowService";
+import { EditablePreviewCache } from "../application/editablePreviewCache";
 import { HistoryService } from "../application/historyService";
 import { MigrationRunner } from "../application/migrationRunner";
 import { SettingsService } from "../application/settingsService";
@@ -53,7 +54,11 @@ export async function createWorkflowHarness(url: string): Promise<WorkflowHarnes
   const handler = createDbRelayCommandHandler({
     settings: new SettingsService(repository),
     flows: new FlowService(repository),
-    runs: new MigrationRunner(connector, repository, repository),
+    flowTransfer: {
+      exportFlow: async () => false,
+      importFlow: async () => ({ kind: "cancelled" as const }),
+    },
+    runs: new MigrationRunner(connector, repository, repository, undefined, new EditablePreviewCache()),
     history: new HistoryService(repository),
     connectors: new ConnectorRegistry([connector]),
   });

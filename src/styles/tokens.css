@@ -5,6 +5,10 @@
   --color-dark-elevated: #252320;
   --color-coral: #cc785c;
   --color-coral-active: #a9583e;
+  --color-restore-active: #a95722;
+  --color-restore-active-hover: #854016;
+  --color-restore-disabled: #ebcdb5;
+  --color-restore-disabled-ink: #8b6850;
   --color-ink: #181715;
   --color-body: #3d3d3a;
   --color-muted: #6c6a64;

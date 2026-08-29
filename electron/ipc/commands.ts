@@ -1,4 +1,5 @@
 export const DB_RELAY_CHANNEL = "db-relay:invoke";
+export const DB_RELAY_RUN_PROGRESS_CHANNEL = "db-relay:run-progress";
 
 export const DB_RELAY_COMMANDS = [
   "list_connections",
@@ -11,11 +12,21 @@ export const DB_RELAY_COMMANDS = [
   "list_flows",
   "save_flow",
   "duplicate_flow",
+  "export_flow",
+  "delete_flow",
+  "import_flow",
   "preview_flow_step",
+  "save_edited_preview",
+  "discard_edited_preview",
   "run_flow_step",
+  "restore_flow_step",
+  "discard_step_restore",
+  "discard_editor_restores",
   "start_run",
   "recover_run",
   "list_run_history",
+  "delete_run_history",
+  "clear_run_history",
 ] as const;
 
 export type DbRelayCommand = typeof DB_RELAY_COMMANDS[number];
@@ -45,10 +56,15 @@ export type FlowDto = {
   name: string;
   sourceConnectionId: string;
   targetConnectionId: string;
-  querySteps: Array<{ id: string; selectSql: string; upsertSql: string }>;
+  querySteps: Array<{ id: string; title?: string; selectSql: string; upsertSql: string }>;
   transactionPolicy: "all_or_nothing" | "commit_successes";
   version: number;
 };
+
+export type ImportFlowResultDto =
+  | { status: "cancelled" }
+  | { status: "saved"; flow: FlowDto }
+  | { status: "needs_connection_selection"; flow: FlowDto };
 
 export type PreviewOracleDateDto = {
   year: number;
@@ -81,6 +97,7 @@ export type PreviewCellDto =
   | { [key: string]: PreviewCellDto };
 
 export type PreviewFlowStepDto = {
+  previewId: string;
   columns: string[];
   rows: Array<Record<string, PreviewCellDto>>;
 };
@@ -134,10 +151,23 @@ export type RunDto = {
   status: RunStatusDto;
   steps: StepStatusDto[];
   events: RunEventDto[];
+  stepTitles?: string[];
+};
+
+export type RunProgressDto = {
+  runId: string;
+  step: number;
+  processedRows: number;
+  totalRows: number;
+  completedBatches: number;
+  totalBatches: number;
 };
 
 export type HistoryRunDto = RunDto & {
   flowId: string;
+  flowName: string;
+  sourceDbName: string;
+  targetDbName: string;
   flowVersion: number;
   startedAt: number;
   endedAt: number | null;
@@ -169,18 +199,33 @@ export type CommandRequestMap = {
   list_flows: undefined;
   save_flow: { request: FlowDto };
   duplicate_flow: { request: { flowId: string; duplicateId: string } };
+  export_flow: { request: { flowId: string } };
+  delete_flow: { request: { flowId: string } };
+  import_flow: undefined;
   preview_flow_step: { request: { sourceConnectionId: string; selectSql: string } };
+  save_edited_preview: {
+    request: { previewId: string; columns: string[]; rows: Array<Record<string, PreviewCellDto>> };
+  };
+  discard_edited_preview: { request: { previewId: string } };
   run_flow_step: {
     request: {
       sourceConnectionId: string;
       targetConnectionId: string;
       selectSql: string;
       upsertSql: string;
+      previewId?: string;
+      editorSessionId?: string;
+      stepId?: string;
     };
   };
+  restore_flow_step: { request: { restoreId: string } };
+  discard_step_restore: { request: { restoreId: string } };
+  discard_editor_restores: { request: { editorSessionId: string } };
   start_run: { request: { flowId: string } };
   recover_run: { request: RecoverRunRequestDto };
   list_run_history: undefined;
+  delete_run_history: { request: { runId: string } };
+  clear_run_history: undefined;
 };
 
 export type CommandResponseMap = {
@@ -194,11 +239,21 @@ export type CommandResponseMap = {
   list_flows: FlowDto[];
   save_flow: FlowDto;
   duplicate_flow: FlowDto;
+  export_flow: { exported: boolean };
+  delete_flow: undefined;
+  import_flow: ImportFlowResultDto;
   preview_flow_step: PreviewFlowStepDto;
-  run_flow_step: { affectedRows: number };
+  save_edited_preview: undefined;
+  discard_edited_preview: undefined;
+  run_flow_step: { affectedRows: number; restoreId?: string };
+  restore_flow_step: { affectedRows: number };
+  discard_step_restore: undefined;
+  discard_editor_restores: undefined;
   start_run: RunDto;
   recover_run: RunDto;
   list_run_history: HistoryRunDto[];
+  delete_run_history: undefined;
+  clear_run_history: { deletedCount: number };
 };
 
 export type CommandArguments<Command extends DbRelayCommand> =
@@ -211,6 +266,7 @@ export interface DbRelayApi {
     command: Command,
     ...args: CommandArguments<Command>
   ): Promise<CommandResponseMap[Command]>;
+  subscribeRunProgress(listener: (progress: RunProgressDto) => void): () => void;
 }
 
 export type DbRelayIpcResult =

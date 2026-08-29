@@ -4,12 +4,12 @@ import { FlowService, type FlowRepository } from "./flowService";
 import type { ConnectionProfile, Flow } from "../domain/models";
 
 describe("FlowService", () => {
-  it("requires distinct source and target connections", async () => {
+  it("allows the same connection for source and target", async () => {
     const repository = new MemoryFlowRepository();
     const service = new FlowService(repository);
 
     await expect(service.saveFlow({ ...flow(), targetConnectionId: "source" }))
-      .rejects.toMatchObject({ code: "CONNECTIONS_NOT_DISTINCT" });
+      .resolves.toMatchObject({ sourceConnectionId: "source", targetConnectionId: "source" });
   });
 
   it("validates required query steps and their SQL policies", async () => {
@@ -44,6 +44,30 @@ describe("FlowService", () => {
     await expect(service.duplicateFlow("daily", "daily-copy"))
       .rejects.toMatchObject({ code: "FLOW_ALREADY_EXISTS" });
   });
+
+  it("normalizes missing and blank step titles by their position", async () => {
+    const repository = new MemoryFlowRepository();
+    const service = new FlowService(repository);
+
+    await expect(service.saveFlow({
+      ...flow(),
+      querySteps: [
+        { id: "first", selectSql: "SELECT id FROM source_table", upsertSql: "UPDATE target_table SET id = :id" },
+        { id: "second", title: "  ", selectSql: "SELECT name FROM source_table", upsertSql: "UPDATE target_table SET name = :name" },
+      ],
+    })).resolves.toMatchObject({
+      querySteps: [{ title: "Step 1" }, { title: "Step 2" }],
+    });
+  });
+
+  it("deletes an existing flow by ID", async () => {
+    const repository = new MemoryFlowRepository();
+    const service = new FlowService(repository);
+    await service.saveFlow(flow());
+
+    await expect(service.deleteFlow("daily")).resolves.toBeUndefined();
+    expect(repository.loadFlow("daily")).toBeUndefined();
+  });
 });
 
 class MemoryFlowRepository implements FlowRepository {
@@ -68,6 +92,10 @@ class MemoryFlowRepository implements FlowRepository {
 
   listFlows(): Flow[] {
     return [...this.flows.values()].map((saved) => structuredClone(saved));
+  }
+
+  deleteFlow(id: string): void {
+    this.flows.delete(id);
   }
 
   loadConnection(id: string): ConnectionProfile | undefined {
