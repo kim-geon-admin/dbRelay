@@ -1,0 +1,18 @@
+appId: com.dbrelay.app
+productName: DB Relay
+directories:
+  output: release
+# Use the Electron distribution installed by pnpm. This avoids Windows locking
+# electron-builder's transient default_app.asar during the default download flow.
+electronDist: node_modules/electron/dist
+files:
+  - dist/**
+  - dist-electron/**
+  - assets/**
+asarUnpack:
+  - node_modules/oracledb/**
+  - node_modules/better-sqlite3/**
+win:
+  icon: assets/db-relay-icon.ico
+  target:
+    - nsis
