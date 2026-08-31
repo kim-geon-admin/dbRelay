@@ -36,7 +36,9 @@ non-null edited value is converted.
 For a complete mapping, Oracle `NUMBER`, `FLOAT`, `BINARY_FLOAT`, and
 `BINARY_DOUBLE` columns are numeric. Values for those columns are converted to
 `number` when safely representable and to `bigint` for integral values outside
-the safe JavaScript integer range. All other target types retain string values.
+the safe JavaScript integer range. The locked node-oracledb 6.10.0 dependency
+supports `bigint` to `DB_TYPE_NUMBER` binds. All other target types retain
+string values.
 
 An invalid numeric string is rejected before DML with the existing safe bind
 diagnostic; no value or SQL text is projected to the renderer.
@@ -59,7 +61,7 @@ diagnostic; no value or SQL text is projected to the renderer.
 - Runner tests cover `null`, numeric and text conversion, and incomplete
   dictionary metadata falling back to strings.
 - Oracle connector tests cover `USER_TAB_COLUMNS` first, `ALL_TAB_COLUMNS`
-  fallback, and numeric classifications.
+  fallback, numeric classifications, and `bigint` `DB_TYPE_NUMBER` binds.
 - UI tests retain no original-type validation and prove empty preview cells save
   as `null`.
 
