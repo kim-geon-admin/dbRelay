@@ -92,6 +92,8 @@ Run은 현재 단계만 실행합니다. 원본·대상 연결과 두 SQL이 모
 
 Run 전에는 Target SQL의 이름 있는 바인드가 Source SQL의 열과 올바르게 연결되는지 검사합니다. 누락·중복·모호한 매핑은 대상 트랜잭션을 시작하기 전에 차단됩니다.
 
+저장한 미리보기 값을 실행할 때는 대상 Oracle 컬럼의 타입도 확인합니다. `NUMBER`, `FLOAT`, `BINARY_FLOAT`, `BINARY_DOUBLE` 대상 컬럼에 연결된 이름 있는 바인드는 안전하게 숫자로 변환되고, 안전한 JavaScript 정수 범위를 넘는 정수는 큰 정수로 전달됩니다. 그 밖의 타입은 문자열로 전달되며 빈 셀은 `null`로 유지됩니다. 대상 컬럼 정보를 완전히 확인할 수 없으면 원래의 문자열·`null` 값을 그대로 사용합니다. 숫자 컬럼에 숫자로 해석할 수 없는 값을 입력하면 대상 DML을 시작하기 전에 실행이 거부됩니다. 이 변환은 저장한 미리보기의 이름 있는 바인드에만 적용되며 SQL 리터럴에는 적용되지 않습니다.
+
 ### 4.4 Target SQL 가이드
 
 Operation을 Insert, Update, Upsert로 바꾸면 DB Relay는 **단순한 Source SELECT**를 읽어 Target SQL 초안을 만듭니다. 예를 들어 다음 Source SQL이라면 첫 열 `CUSTOMER_ID`를 Update의 `WHERE` 조건 또는 Upsert의 `ON` 조건 후보로 사용하고, SELECT 열 이름을 이름 있는 바인드로 만듭니다.
