@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import { StepPreviewDialog } from "./StepPreviewDialog";
 
@@ -36,7 +36,7 @@ test("renders preview rows in source column order and safely formats special val
   expect(screen.getByRole("textbox", { name: "BIG_ID row 1" })).toHaveValue("9007199254740993");
   expect(screen.getByRole("textbox", { name: "CREATED_AT row 1" })).toHaveValue('{"year":2026,"month":8,"day":13,"hour":9,"minute":10,"second":11}');
   expect(screen.getByRole("textbox", { name: "PAYLOAD row 1" })).toHaveValue("AQID");
-  expect(screen.getByRole("textbox", { name: "NOTE row 1" })).toHaveValue("null");
+  expect(screen.getByRole("textbox", { name: "NOTE row 1" })).toHaveValue("");
 });
 
 test("shows an empty state and closes from its labelled close button", () => {
@@ -72,7 +72,7 @@ test("edits string cells and saves the changed preview rows", async () => {
   });
 });
 
-test("renders all cells in edit mode, preserves a number type, and marks it changed", async () => {
+test("renders all cells in edit mode and marks a numeric cell changed", async () => {
   const onSave = vi.fn().mockResolvedValue(undefined);
   render(<StepPreviewDialog preview={{
     previewId: "preview-number",
@@ -87,7 +87,36 @@ test("renders all cells in edit mode, preserves a number type, and marks it chan
 
   expect(cell).toHaveClass("step-preview-dialog__cell--changed");
   fireEvent.click(document.querySelector<HTMLButtonElement>(".step-preview-dialog__header button")!);
-  await expect(onSave).toHaveBeenCalledWith({ columns: ["ID"], rows: [{ ID: 8 }] });
+  await waitFor(() => expect(onSave).toHaveBeenCalledWith({ columns: ["ID"], rows: [{ ID: "8" }] }));
+});
+
+test("saves a non-empty edit without comparing it to the original cell type", async () => {
+  const onSave = vi.fn().mockResolvedValue(undefined);
+  render(<StepPreviewDialog preview={{
+    previewId: "preview-type-free",
+    columns: ["ID"],
+    rows: [{ ID: 7 }],
+  }} onClose={vi.fn()} onSave={onSave} />);
+
+  fireEvent.change(screen.getByRole("textbox", { name: "ID row 1" }), { target: { value: "custom-id" } });
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  await expect(onSave).toHaveBeenCalledWith({ columns: ["ID"], rows: [{ ID: "custom-id" }] });
+  expect(screen.queryByText("The value must keep its original type.")).not.toBeInTheDocument();
+});
+
+test("saves an empty edited cell as null", async () => {
+  const onSave = vi.fn().mockResolvedValue(undefined);
+  render(<StepPreviewDialog preview={{
+    previewId: "preview-empty-cell",
+    columns: ["NAME"],
+    rows: [{ NAME: "Ada" }],
+  }} onClose={vi.fn()} onSave={onSave} />);
+
+  fireEvent.change(screen.getByRole("textbox", { name: "NAME row 1" }), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  await expect(onSave).toHaveBeenCalledWith({ columns: ["NAME"], rows: [{ NAME: null }] });
 });
 
 test("fills the rows below a numeric header's first value after confirmation", () => {
