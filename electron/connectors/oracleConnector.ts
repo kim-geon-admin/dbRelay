@@ -16,6 +16,7 @@ import {
   ConnectorError,
   type DatabaseConnectorFactory,
   type DatabaseSession,
+  type TargetColumnKind,
 } from "./databaseConnector";
 
 type OracleType = unknown;
@@ -146,6 +147,49 @@ class OracleSession implements DatabaseSession {
       rows: results.flatMap((result) => result.rows),
       unsupportedBindColumns: results[0]?.unsupportedBindColumns ?? [],
     };
+  }
+
+  async describeTargetColumns(
+    table: string,
+    columns: readonly string[],
+  ): Promise<Record<string, TargetColumnKind>> {
+    this.requireOpen();
+    const tableName = dictionaryIdentifier(table);
+    const columnNames = uniqueDictionaryIdentifiers(columns);
+    if (tableName === undefined || columnNames === undefined || columnNames.length === 0) {
+      return {};
+    }
+    try {
+      const userColumns = await this.queryTargetColumns("USER_TAB_COLUMNS", tableName, columnNames);
+      const userKinds = completeTargetColumnKinds(userColumns, columnNames);
+      if (userKinds !== undefined) return userKinds;
+
+      const allColumns = await this.queryTargetColumns("ALL_TAB_COLUMNS", tableName, columnNames);
+      return completeTargetColumnKinds(allColumns, columnNames) ?? {};
+    } catch (error) {
+      throw connectorError(error, [this.secret]);
+    }
+  }
+
+  private async queryTargetColumns(
+    dictionary: "USER_TAB_COLUMNS" | "ALL_TAB_COLUMNS",
+    tableName: string,
+    columnNames: readonly string[],
+  ): Promise<unknown[]> {
+    const binds = Object.fromEntries([
+      ["TABLE_NAME", tableName],
+      ...columnNames.map((column, index) => [`COLUMN_${index}`, column]),
+    ]);
+    const placeholders = columnNames.map((_, index) => `:COLUMN_${index}`).join(", ");
+    const result = await this.connection.execute(
+      `SELECT COLUMN_NAME, DATA_TYPE FROM ${dictionary} WHERE TABLE_NAME = :TABLE_NAME AND COLUMN_NAME IN (${placeholders})`,
+      binds,
+      {
+        outFormat: this.driver.OUT_FORMAT_OBJECT,
+        fetchTypeHandler: () => undefined,
+      },
+    );
+    return result.rows ?? [];
   }
 
   private async queryWithBinds(sql: string, binds: unknown) {
@@ -444,6 +488,80 @@ function canonicalDecimal(value: string): string | undefined {
   return match[1] === "-" && !isZero ? `-${unsigned}` : unsigned;
 }
 
+function completeTargetColumnKinds(
+  rows: readonly unknown[],
+  columnNames: readonly string[],
+): Record<string, TargetColumnKind> | undefined {
+  const result: Record<string, TargetColumnKind> = {};
+  for (const columnName of columnNames) {
+    const matchingKinds = rows.flatMap((row) => {
+      if (!isRecord(row) || row.COLUMN_NAME !== columnName || typeof row.DATA_TYPE !== "string") {
+        return [];
+      }
+      return [oracleTargetColumnKind(row.DATA_TYPE)];
+    });
+    if (matchingKinds.length !== 1) return undefined;
+    result[columnName] = matchingKinds[0];
+  }
+  return result;
+}
+
+function oracleTargetColumnKind(dataType: string): TargetColumnKind {
+  return new Set(["NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE"])
+    .has(dataType.trim().toUpperCase())
+    ? "numeric"
+    : "text";
+}
+
+function uniqueDictionaryIdentifiers(values: readonly string[]): string[] | undefined {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const identifier = dictionaryIdentifier(value);
+    if (identifier === undefined) return undefined;
+    if (!seen.has(identifier)) {
+      seen.add(identifier);
+      result.push(identifier);
+    }
+  }
+  return result;
+}
+
+function dictionaryIdentifier(value: string): string | undefined {
+  const parts: string[] = [];
+  let index = 0;
+  while (index < value.length) {
+    let part = "";
+    if (value[index] === '"') {
+      index += 1;
+      while (index < value.length) {
+        if (value[index] !== '"') {
+          part += value[index];
+          index += 1;
+        } else if (value[index + 1] === '"') {
+          part += '"';
+          index += 2;
+        } else {
+          index += 1;
+          break;
+        }
+      }
+      if (part === "" || value[index - 1] !== '"') return undefined;
+    } else {
+      const match = /^[\p{L}_][\p{L}\p{M}\p{Nd}_$#]*/u.exec(value.slice(index));
+      if (match === null) return undefined;
+      part = match[0].toUpperCase();
+      index += part.length;
+    }
+    parts.push(part);
+    if (index === value.length) break;
+    if (value[index] !== ".") return undefined;
+    index += 1;
+    if (index === value.length) return undefined;
+  }
+  return parts[parts.length - 1];
+}
+
 function isSupportedColumnType(driver: OracleDriver, metadata: OracleMetadata): boolean {
   const { dbType } = metadata;
   if (dbType === driver.DB_TYPE_TIMESTAMP
@@ -592,7 +710,7 @@ function bindDefinition(
 function bindKind(value: DomainValue): string {
   if (typeof value === "string") return "string";
   if (typeof value === "number") return "number";
-  if (typeof value === "bigint") return "unsupported";
+  if (typeof value === "bigint") return "number";
   if (typeof value === "boolean") return "boolean";
   if (value instanceof Uint8Array) return "bytes";
   if (isOracleTimestamp(value)) return "timestamp";

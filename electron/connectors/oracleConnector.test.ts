@@ -89,6 +89,44 @@ describe("OracleConnector", () => {
     await session.close();
   });
 
+  it("classifies numeric and text target columns from USER_TAB_COLUMNS", async () => {
+    const { connector, connection } = fixture({
+      execute: vi.fn().mockResolvedValue({
+        rows: [
+          { COLUMN_NAME: "USER_ID", DATA_TYPE: "NUMBER" },
+          { COLUMN_NAME: "LOGIN_ID", DATA_TYPE: "VARCHAR2" },
+        ],
+      }),
+    });
+    const session = await connector.open(profile(), "secret");
+
+    expect(session.describeTargetColumns).toBeTypeOf("function");
+    await expect(session.describeTargetColumns!("TGT_USERS", ["USER_ID", "LOGIN_ID"]))
+      .resolves.toEqual({ USER_ID: "numeric", LOGIN_ID: "text" });
+    expect(connection.execute).toHaveBeenCalledWith(
+      expect.stringContaining("USER_TAB_COLUMNS"), expect.anything(), expect.anything(),
+    );
+    await session.close();
+  });
+
+  it("uses ALL_TAB_COLUMNS when USER_TAB_COLUMNS is incomplete", async () => {
+    const { connector, connection } = fixture({
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ COLUMN_NAME: "USER_ID", DATA_TYPE: "NUMBER" }] })
+        .mockResolvedValueOnce({ rows: [
+          { COLUMN_NAME: "USER_ID", DATA_TYPE: "NUMBER" },
+          { COLUMN_NAME: "LOGIN_ID", DATA_TYPE: "VARCHAR2" },
+        ] }),
+    });
+    const session = await connector.open(profile(), "secret");
+
+    expect(session.describeTargetColumns).toBeTypeOf("function");
+    await expect(session.describeTargetColumns!("TGT_USERS", ["USER_ID", "LOGIN_ID"]))
+      .resolves.toEqual({ USER_ID: "numeric", LOGIN_ID: "text" });
+    expect(connection.execute.mock.calls[1][0]).toContain("ALL_TAB_COLUMNS");
+    await session.close();
+  });
+
   it("returns Oracle ROWIDs from a named DML returning batch", async () => {
     const { connector, connection } = fixture({
       executeMany: vi.fn().mockResolvedValue({
@@ -287,20 +325,18 @@ describe("OracleConnector", () => {
     await session.close();
   });
 
-  it("rejects bigint binds that are unsupported by the declared node-oracledb 6.2 contract", async () => {
+  it("binds a bigint as DB_TYPE_NUMBER", async () => {
     const { connector, connection } = fixture();
     const session = await connector.open(profile(), "secret");
 
-    const error = await expectConnectorRejection(
-      session.executeNamed("MERGE INTO t USING :ID", [{ ID: 9_007_199_254_740_993n }]),
-    );
+    await session.executeNamed("MERGE INTO t USING :ID", [{ ID: 9_007_199_254_740_993n }]);
 
-    expect(error).toMatchObject({
-      code: "BIND_TYPE_UNSUPPORTED",
-      message: "bind-type-unsupported:ID:large_integer",
+    expect(connection.executeMany).toHaveBeenCalledWith("MERGE INTO t USING :ID", [
+      { ID: 9_007_199_254_740_993n },
+    ], {
+      autoCommit: false,
+      bindDefs: { ID: { type: "DB_TYPE_NUMBER" } },
     });
-    expect(error.message).not.toContain("9007199254740993");
-    expect(connection.executeMany).not.toHaveBeenCalled();
     await session.close();
   });
 

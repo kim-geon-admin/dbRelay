@@ -16,9 +16,15 @@ export class ConnectorError extends Error {
   }
 }
 
+export type TargetColumnKind = "numeric" | "text";
+
 export interface DatabaseSession {
   query(sql: string): Promise<RowSet>;
   queryNamed?(sql: string, rows: readonly NamedRow[]): Promise<RowSet>;
+  describeTargetColumns?(
+    table: string,
+    columns: readonly string[],
+  ): Promise<Record<string, TargetColumnKind>>;
   begin(): Promise<void>;
   executeNamed(sql: string, rows: readonly NamedRow[]): Promise<number>;
   executeNamedReturningRowIds?(sql: string, rows: readonly NamedRow[]): Promise<{
