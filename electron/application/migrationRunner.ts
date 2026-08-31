@@ -20,7 +20,7 @@ import { RunError, RunState } from "../domain/runState";
 import { validateSourceStatement, validateTargetStatement } from "../domain/sqlValidation";
 import { EditablePreviewCache } from "./editablePreviewCache";
 import { StepRestoreCache, type RestoreAction } from "./stepRestoreCache";
-import { parseRestorableDml } from "../domain/restorableDml";
+import { parseRestorableDml, type TargetBindColumn } from "../domain/restorableDml";
 import type { FlowRepository, HistoryRepository, RunBinding } from "./ports";
 
 export interface CredentialResolver {
@@ -168,11 +168,18 @@ export class MigrationRunner {
         source = await this.connector.open(sourceProfile, sourceSecret);
       }
       target = await this.connector.open(targetProfile, targetSecret);
-      const batch = savedRows === undefined
+      let batch = savedRows === undefined
         ? await prepareStepBatch(source!, step)
         : prepareRowSetBatch(savedRows, step);
-      validateTargetBatch(batch);
       const plan = parseRestorableDml(step.upsertSql);
+      if (savedRows !== undefined && plan !== undefined && target.describeTargetColumns !== undefined) {
+        const columnKinds = await target.describeTargetColumns(
+          plan.table,
+          plan.bindColumns.map(({ column }) => column),
+        );
+        batch = coerceSavedPreviewBatch(batch, plan.bindColumns, columnKinds);
+      }
+      validateTargetBatch(batch);
       if (input.editorSessionId && input.stepId) this.stepRestores.discardStep(input.editorSessionId, input.stepId);
       const before = plan === undefined || plan.kind === "insert" || target.queryNamed === undefined
         ? undefined : await captureRestoreRows(target, plan.table, plan.keyTerms, plan.assignedColumns, batch);
@@ -853,6 +860,79 @@ function prepareRowSetBatch(rows: RowSet, step: QueryStep): NamedRow[] {
       "source columns do not satisfy target bind parameters",
     );
   }
+}
+
+function coerceSavedPreviewBatch(
+  rows: readonly NamedRow[],
+  bindColumns: readonly TargetBindColumn[],
+  columnKinds: Readonly<Record<string, "numeric" | "text">>,
+): NamedRow[] {
+  const bindKinds = completeBindKinds(bindColumns, columnKinds);
+  if (bindKinds === undefined) return [...rows];
+  return rows.map((row) => Object.fromEntries(Object.entries(row).map(([bindName, value]) => {
+    const kind = bindKinds.get(bindName.toUpperCase());
+    if (kind === undefined || value === null) return [bindName, value];
+    return [bindName, kind === "numeric" ? coerceNumericPreviewValue(value) : String(value)];
+  })));
+}
+
+function completeBindKinds(
+  bindColumns: readonly TargetBindColumn[],
+  columnKinds: Readonly<Record<string, "numeric" | "text">>,
+): Map<string, "numeric" | "text"> | undefined {
+  const result = new Map<string, "numeric" | "text">();
+  for (const { column, bindName } of bindColumns) {
+    const kind = Object.entries(columnKinds).find(([name]) =>
+      name.toUpperCase() === column.toUpperCase())?.[1];
+    if (kind === undefined) return undefined;
+    const key = bindName.toUpperCase();
+    const existing = result.get(key);
+    if (existing !== undefined && existing !== kind) return undefined;
+    result.set(key, kind);
+  }
+  return result;
+}
+
+function coerceNumericPreviewValue(value: Exclude<NamedRow[string], null>): number | bigint {
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return value;
+  } else if (typeof value === "bigint") {
+    return value;
+  } else if (typeof value === "string") {
+    const canonical = canonicalDecimal(value);
+    if (canonical !== undefined) {
+      if (!canonical.includes(".")) {
+        const numeric = Number(canonical);
+        if (Number.isSafeInteger(numeric)) return numeric;
+        return BigInt(canonical);
+      }
+      const numeric = Number(canonical);
+      if (Number.isFinite(numeric) && canonicalDecimal(numeric.toString()) === canonical) return numeric;
+    }
+  }
+  throw RunError.connector(
+    "BIND_TYPE_UNSUPPORTED",
+    "saved preview value is invalid for a numeric target column",
+  );
+}
+
+function canonicalDecimal(value: string): string | undefined {
+  const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/u.exec(value.trim());
+  if (match === null || (match[2] === "" && (match[3] ?? "") === "")) return undefined;
+  const exponent = Number(match[4] ?? "0");
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 10_000) return undefined;
+  const digits = match[2] + (match[3] ?? "");
+  const decimalPosition = match[2].length + exponent;
+  const expanded = decimalPosition <= 0
+    ? `0.${"0".repeat(-decimalPosition)}${digits}`
+    : decimalPosition >= digits.length
+      ? digits + "0".repeat(decimalPosition - digits.length)
+      : `${digits.slice(0, decimalPosition)}.${digits.slice(decimalPosition)}`;
+  const [wholePart, fractionalPart = ""] = expanded.split(".");
+  const whole = wholePart.replace(/^0+(?=\d)/u, "") || "0";
+  const fractional = fractionalPart.replace(/0+$/u, "");
+  const unsigned = fractional === "" ? whole : `${whole}.${fractional}`;
+  return match[1] === "-" && unsigned !== "0" ? `-${unsigned}` : unsigned;
 }
 
 function validateStepPolicy(targetProfile: ConnectionProfile, step: QueryStep): void {

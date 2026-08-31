@@ -4,6 +4,7 @@ import {
   ConnectorError,
   type DatabaseConnectorFactory,
   type DatabaseSession,
+  type TargetColumnKind,
 } from "../connectors/databaseConnector";
 import type {
   ConnectionProfile,
@@ -280,6 +281,105 @@ describe("MigrationRunner", () => {
     expect(test.connector.sourceQueries).toEqual(["customer"]);
     expect(test.connector.targetTransactions()).toEqual(["begin", "execute:0", "commit"]);
     expect(test.connector.closedProfiles).toEqual(["source", "target"]);
+  });
+
+  it("coerces saved preview values from complete target metadata", async () => {
+    const test = harness("all_or_nothing")
+      .sourceRowsAt(0, userPreviewRowSet())
+      .targetColumnKinds({ USER_ID: "numeric", LOGIN_ID: "text" });
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+    });
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["USER_ID", "LOGIN_ID"],
+      rows: [{ USER_ID: "123", LOGIN_ID: 123 }],
+    });
+
+    await test.runner.runFlowStep({
+      sourceConnectionId: "source", targetConnectionId: "target",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+      upsertSql: "UPDATE TGT_USERS SET LOGIN_ID = :LOGIN_ID WHERE USER_ID = :USER_ID",
+      previewId: preview.previewId,
+    });
+
+    expect(test.connector.executedRows).toEqual([{ USER_ID: 123, LOGIN_ID: "123" }]);
+  });
+
+  it("retains null and uses bigint for a large integral numeric preview value", async () => {
+    const test = harness("all_or_nothing")
+      .sourceRowsAt(0, userPreviewRowSet())
+      .targetColumnKinds({ USER_ID: "numeric", LOGIN_ID: "text" });
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+    });
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["USER_ID", "LOGIN_ID"],
+      rows: [{ USER_ID: "9007199254740993", LOGIN_ID: null }],
+    });
+
+    await test.runner.runFlowStep({
+      sourceConnectionId: "source", targetConnectionId: "target",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+      upsertSql: "UPDATE TGT_USERS SET LOGIN_ID = :LOGIN_ID WHERE USER_ID = :USER_ID",
+      previewId: preview.previewId,
+    });
+
+    expect(test.connector.executedRows).toEqual([{
+      USER_ID: 9_007_199_254_740_993n,
+      LOGIN_ID: null,
+    }]);
+  });
+
+  it("falls back to strings when target metadata is incomplete", async () => {
+    const test = harness("all_or_nothing")
+      .sourceRowsAt(0, userPreviewRowSet())
+      .targetColumnKinds({ USER_ID: "numeric" });
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+    });
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["USER_ID", "LOGIN_ID"],
+      rows: [{ USER_ID: "123", LOGIN_ID: "123" }],
+    });
+
+    await test.runner.runFlowStep({
+      sourceConnectionId: "source", targetConnectionId: "target",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+      upsertSql: "UPDATE TGT_USERS SET LOGIN_ID = :LOGIN_ID WHERE USER_ID = :USER_ID",
+      previewId: preview.previewId,
+    });
+
+    expect(test.connector.executedRows).toEqual([{ USER_ID: "123", LOGIN_ID: "123" }]);
+  });
+
+  it("rejects nonnumeric text for a known numeric target column before beginning", async () => {
+    const test = harness("all_or_nothing")
+      .sourceRowsAt(0, userPreviewRowSet())
+      .targetColumnKinds({ USER_ID: "numeric", LOGIN_ID: "text" });
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+    });
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["USER_ID", "LOGIN_ID"],
+      rows: [{ USER_ID: "not-a-number", LOGIN_ID: "123" }],
+    });
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source", targetConnectionId: "target",
+      selectSql: "SELECT user_id, login_id FROM SRC_USERS",
+      upsertSql: "UPDATE TGT_USERS SET LOGIN_ID = :LOGIN_ID WHERE USER_ID = :USER_ID",
+      previewId: preview.previewId,
+    })).rejects.toMatchObject({ code: "BIND_TYPE_UNSUPPORTED" });
+
+    expect(test.connector.targetTransactions()).toEqual([]);
   });
 
   it("discards a saved preview after a failed target run", async () => {
@@ -1371,6 +1471,11 @@ class RunnerHarness {
     return this;
   }
 
+  targetColumnKinds(kinds: Record<string, TargetColumnKind>): this {
+    this.connector.targetColumnKinds = kinds;
+    return this;
+  }
+
   configureOperationSteps(operations: readonly TargetOperation[]): this {
     const flow = this.repository.loadFlow(this.flowId)!;
     this.repository.saveFlow({
@@ -1423,11 +1528,13 @@ class RecordingConnector implements DatabaseConnectorFactory {
   readonly sourceQueries: string[] = [];
   readonly targetOperations: string[] = [];
   readonly executedRowCounts: number[] = [];
+  readonly executedRows: NamedRow[] = [];
   readonly executedSql: string[] = [];
   readonly openedProfiles: string[] = [];
   readonly closedProfiles: string[] = [];
   commitFailure?: ConnectorError;
   rollbackFailure?: ConnectorError;
+  targetColumnKinds: Record<string, TargetColumnKind> = {};
   private sourceQueryCount = 0;
   private targetExecuteCount = 0;
 
@@ -1474,6 +1581,7 @@ class RecordingConnector implements DatabaseConnectorFactory {
   private targetSession(profileId: string): DatabaseSession {
     return {
       query: async () => emptyRowSet(),
+      describeTargetColumns: async () => structuredClone(this.targetColumnKinds),
       begin: async () => {
         this.targetOperations.push(this.committedLabels
           ? `begin:${this.targetExecuteCount}`
@@ -1483,6 +1591,7 @@ class RecordingConnector implements DatabaseConnectorFactory {
         const execution = this.targetExecuteCount++;
         this.executedSql.push(sql);
         this.executedRowCounts.push(rows.length);
+        this.executedRows.push(...structuredClone(rows));
         this.targetOperations.push(`execute:${execution}`);
         const failure = this.targetFailures.get(execution);
         if (failure !== undefined) throw failure;
@@ -1585,6 +1694,14 @@ function rowSet(column: string, value: DomainValue | Date): RowSet {
     columns: [column],
     unsupportedBindColumns: [],
     rows: [{ [column]: value as DomainValue }],
+  };
+}
+
+function userPreviewRowSet(): RowSet {
+  return {
+    columns: ["USER_ID", "LOGIN_ID"],
+    unsupportedBindColumns: [],
+    rows: [{ USER_ID: 1, LOGIN_ID: "seed" }],
   };
 }
 

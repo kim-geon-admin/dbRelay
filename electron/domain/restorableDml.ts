@@ -1,8 +1,11 @@
+export type TargetBindColumn = { column: string; bindName: string };
+
 export type RestorableDmlPlan = {
   kind: "insert" | "update" | "upsert";
   table: string;
-  keyTerms: Array<{ column: string; bindName: string }>;
+  keyTerms: TargetBindColumn[];
   assignedColumns: string[];
+  bindColumns: TargetBindColumn[];
 };
 
 const identifierSource = String.raw`(?:[\p{L}_][\p{L}\p{M}\p{Nd}_$#]*|"(?:[^"]|"")+")`;
@@ -18,11 +21,17 @@ export function parseRestorableDml(sql: string): RestorableDmlPlan | undefined {
 function parseUpdate(sql: string): RestorableDmlPlan | undefined {
   const match = new RegExp(`^UPDATE (${qualifiedIdentifierSource}) SET (.+) WHERE (.+)$`, "iu").exec(sql);
   if (match === null) return undefined;
-  const assignedColumns = assignmentColumns(match[2], "");
+  const assignments = assignmentBinds(match[2]);
   const keyTerms = equalityTerms(match[3], "", "");
-  return assignedColumns === undefined || keyTerms === undefined
+  return assignments === undefined || keyTerms === undefined
     ? undefined
-    : { kind: "update", table: match[1], keyTerms, assignedColumns };
+    : {
+      kind: "update",
+      table: match[1],
+      keyTerms,
+      assignedColumns: uniqueIdentifiers(assignments.map(({ column }) => column)),
+      bindColumns: uniqueBindColumns([...assignments, ...keyTerms]),
+    };
 }
 
 function parseInsert(sql: string): RestorableDmlPlan | undefined {
@@ -35,7 +44,16 @@ function parseInsert(sql: string): RestorableDmlPlan | undefined {
   const values = match[3].split(",").map((value) => value.trim());
   if (columns === undefined || columns.length !== values.length
     || !values.every((value) => new RegExp(`^:${bindSource}$`, "u").test(value))) return undefined;
-  return { kind: "insert", table: match[1], keyTerms: [], assignedColumns: columns };
+  return {
+    kind: "insert",
+    table: match[1],
+    keyTerms: [],
+    assignedColumns: columns,
+    bindColumns: uniqueBindColumns(columns.map((column, index) => ({
+      column,
+      bindName: values[index].slice(1),
+    }))),
+  };
 }
 
 function parseMerge(sql: string): RestorableDmlPlan | undefined {
@@ -59,17 +77,18 @@ function parseMerge(sql: string): RestorableDmlPlan | undefined {
     table: match[1],
     keyTerms,
     assignedColumns: uniqueIdentifiers([...updated, ...inserted]),
+    bindColumns: uniqueBindColumns([...projectionBinds.values()]),
   };
 }
 
-function projectionBindNames(value: string): Map<string, string> | undefined {
-  const result = new Map<string, string>();
+function projectionBindNames(value: string): Map<string, TargetBindColumn> | undefined {
+  const result = new Map<string, TargetBindColumn>();
   for (const item of value.split(",").map((item) => item.trim())) {
     const match = new RegExp(`^:(${bindSource}) (${identifierSource})$`, "u").exec(item);
     if (match === null) return undefined;
     const key = identifierKey(match[2]);
     if (result.has(key)) return undefined;
-    result.set(key, match[1]);
+    result.set(key, { column: match[2], bindName: match[1] });
   }
   return result.size === 0 ? undefined : result;
 }
@@ -78,11 +97,11 @@ function equalityTerms(
   value: string,
   leftPrefix: string,
   rightPrefix: string,
-  projectionBinds?: ReadonlyMap<string, string>,
-): Array<{ column: string; bindName: string }> | undefined {
+  projectionBinds?: ReadonlyMap<string, TargetBindColumn>,
+): TargetBindColumn[] | undefined {
   const terms = value.split(/\s+AND\s+/iu);
   if (terms.length === 0) return undefined;
-  const result: Array<{ column: string; bindName: string }> = [];
+  const result: TargetBindColumn[] = [];
   for (const item of terms) {
     const right = rightPrefix === "" ? `:(${bindSource})` : `(${identifierSource})`;
     const match = new RegExp(
@@ -90,7 +109,7 @@ function equalityTerms(
       "iu",
     ).exec(item.trim());
     if (match === null) return undefined;
-    const bindName = rightPrefix === "" ? match[2] : projectionBinds?.get(identifierKey(match[2]));
+    const bindName = rightPrefix === "" ? match[2] : projectionBinds?.get(identifierKey(match[2]))?.bindName;
     if (bindName === undefined) return undefined;
     result.push({ column: match[1], bindName });
   }
@@ -110,6 +129,16 @@ function assignmentColumns(value: string, targetPrefix: string, sourcePrefix?: s
   return uniqueIdentifiers(result);
 }
 
+function assignmentBinds(value: string): TargetBindColumn[] | undefined {
+  const result: TargetBindColumn[] = [];
+  for (const item of value.split(",").map((item) => item.trim())) {
+    const match = new RegExp(`^(${identifierSource}) = :(${bindSource})$`, "iu").exec(item);
+    if (match === null) return undefined;
+    result.push({ column: match[1], bindName: match[2] });
+  }
+  return uniqueBindColumns(result);
+}
+
 function commaSeparatedIdentifiers(value: string): string[] | undefined {
   const identifiers = value.split(",").map((item) => item.trim());
   return identifiers.length > 0 && identifiers.every((item) => identifier.test(item))
@@ -120,7 +149,7 @@ function commaSeparatedIdentifiers(value: string): string[] | undefined {
 function sourceValueMatches(
   _column: string,
   value: string | undefined,
-  projectionBinds: ReadonlyMap<string, string>,
+  projectionBinds: ReadonlyMap<string, TargetBindColumn>,
 ): boolean {
   if (value === undefined) return false;
   const match = new RegExp(`^source\\.(${identifierSource})$`, "iu").exec(value);
@@ -147,6 +176,16 @@ function uniqueKeyTerms(values: readonly { column: string; bindName: string }[])
     unique.push(value);
   }
   return unique;
+}
+
+function uniqueBindColumns(values: readonly TargetBindColumn[]): TargetBindColumn[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = identifierKey(value.column);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function identifierKey(value: string): string {
