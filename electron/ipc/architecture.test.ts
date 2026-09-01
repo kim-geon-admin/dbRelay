@@ -143,6 +143,7 @@ function isExcludedPath(path: string): boolean {
   const excludedRoots = [
     ".git",
     ".superpowers",
+    ".worktrees",
     "dist",
     "dist-electron",
     "node_modules",
