@@ -187,6 +187,54 @@ test("saves edited preview rows and discards their token when the editor unmount
   expect(discardEditedPreview).toHaveBeenCalledWith("preview-1");
 });
 
+test("generates INSERT Target SQL from saved single-table SELECT * preview columns", async () => {
+  vi.mocked(previewFlowStep).mockResolvedValue({
+    previewId: "preview-star",
+    columns: ["USER_ID", "CREATED_ON", "CREATED_AT"],
+    rows: [{ USER_ID: 1, CREATED_ON: "2026-09-01 14:30:25", CREATED_AT: "2026-09-01 14:30:25.000000" }],
+  });
+  vi.mocked(saveEditedPreview).mockResolvedValue(undefined);
+  vi.mocked(runFlowStep).mockResolvedValue({ affectedRows: 1 });
+  render(<StatefulStepEditor sourceConnectionId="source-1" targetConnectionId="target-1" initialStep={{
+    id: "step-star", selectSql: "SELECT * FROM SRC_USERS \nWHERE user_id=1002", upsertSql: "", operation: "insert",
+  }} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "미리보기" }));
+  await screen.findByRole("dialog");
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  expect(await screen.findByRole("textbox", { name: "Target SQL for step 1" })).toHaveValue(
+    "INSERT INTO SRC_USERS (USER_ID, CREATED_ON, CREATED_AT)\nVALUES (:USER_ID, :CREATED_ON, :CREATED_AT)",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Run" }));
+  await expect(runFlowStep).toHaveBeenCalledWith(expect.objectContaining({ previewId: "preview-star" }));
+});
+
+test("shows a reason when preview columns cannot generate SELECT * INSERT Target SQL", async () => {
+  vi.mocked(previewFlowStep).mockResolvedValue({
+    previewId: "preview-duplicate",
+    columns: ["USER_ID", "user_id"],
+    rows: [{ USER_ID: 1, user_id: 1 }],
+  });
+  vi.mocked(saveEditedPreview).mockResolvedValue(undefined);
+  render(<StatefulStepEditor sourceConnectionId="source-1" initialStep={{
+    id: "step-duplicate",
+    selectSql: "SELECT * FROM SRC_USERS",
+    upsertSql: "INSERT INTO SRC_USERS (USER_ID)\nVALUES (:USER_ID)",
+    operation: "insert",
+  }} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "미리보기" }));
+  await screen.findByRole("dialog");
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  expect(await screen.findByText("미리보기 컬럼에 중복된 이름이 있어 Target SQL을 생성할 수 없습니다.")).toBeVisible();
+  // Would fail if a failed generation cleared the Target SQL the step already had.
+  expect(screen.getByRole("textbox", { name: "Target SQL for step 1" })).toHaveValue(
+    "INSERT INTO SRC_USERS (USER_ID)\nVALUES (:USER_ID)",
+  );
+});
+
 test("runs the step with its saved preview token without requesting source rows again", async () => {
   vi.mocked(previewFlowStep).mockResolvedValue({
     previewId: "preview-2",

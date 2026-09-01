@@ -211,15 +211,59 @@ describe("OracleConnector", () => {
     await session.close();
   });
 
-  it("marks timestamp columns with sub-millisecond source precision as unsupported", async () => {
-    const { connector } = fixture({
+  it("reads driver Date values for DATE and zoned TIMESTAMP columns", async () => {
+    // Would fail if temporal columns were fetched as text: node-oracledb Thin
+    // mode would answer with Date.toString() instead of the session format.
+    const { connector, connection, driver } = fixture({
+      execute: vi.fn().mockResolvedValue({
+        metaData: [
+          { name: "LAST_LOGIN_AT", dbType: "DB_TYPE_DATE" },
+          { name: "PASSWORD_CHANGED_AT", dbType: "DB_TYPE_TIMESTAMP", precision: 6 },
+          { name: "SEEN_AT", dbType: "DB_TYPE_TIMESTAMP_TZ" },
+        ],
+        rows: [{
+          LAST_LOGIN_AT: new Date(2026, 8, 1, 14, 30, 25),
+          PASSWORD_CHANGED_AT: new Date(2026, 8, 1, 14, 30, 25, 123),
+          SEEN_AT: new Date(2026, 8, 1, 14, 30, 25, 500),
+        }],
+      }),
+    });
+    const session = await connector.open(profile(), "secret");
+
+    const result = await session.query("SELECT last_login_at, password_changed_at, seen_at FROM relay_test");
+
+    expect(result).toEqual({
+      columns: ["LAST_LOGIN_AT", "PASSWORD_CHANGED_AT", "SEEN_AT"],
+      unsupportedBindColumns: [],
+      rows: [{
+        LAST_LOGIN_AT: { year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25 },
+        PASSWORD_CHANGED_AT: {
+          year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
+          microsecond: 123_000, tzHourOffset: 0, tzMinuteOffset: 0,
+        },
+        SEEN_AT: {
+          year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
+          microsecond: 500_000, tzHourOffset: 0, tzMinuteOffset: 0,
+        },
+      }],
+    });
+    const fetchType = queryOptions(connection).fetchTypeHandler;
+    expect(fetchType({ dbType: driver.DB_TYPE_DATE })).toBeUndefined();
+    expect(fetchType({ dbType: driver.DB_TYPE_TIMESTAMP })).toBeUndefined();
+    expect(fetchType({ dbType: driver.DB_TYPE_TIMESTAMP_TZ })).toBeUndefined();
+    expect(fetchType({ dbType: driver.DB_TYPE_NUMBER })).toEqual({ type: driver.DB_TYPE_VARCHAR });
+    await session.close();
+  });
+
+  it("preserves six-digit TIMESTAMP values instead of omitting them from source rows", async () => {
+    const { connector, connection, driver } = fixture({
       execute: vi.fn().mockResolvedValue({
         metaData: [{
           name: "HAPPENED_AT",
           dbType: "DB_TYPE_TIMESTAMP",
           precision: 6,
         }],
-        rows: [{ HAPPENED_AT: new Date(2026, 7, 1, 12, 30, 0, 123) }],
+        rows: [{ HAPPENED_AT: "2026-09-01 14:30:25.123456" }],
       }),
     });
     const session = await connector.open(profile(), "secret");
@@ -228,8 +272,87 @@ describe("OracleConnector", () => {
 
     expect(result).toEqual({
       columns: ["HAPPENED_AT"],
-      unsupportedBindColumns: ["HAPPENED_AT"],
-      rows: [{}],
+      unsupportedBindColumns: [],
+      rows: [{
+        HAPPENED_AT: {
+          year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
+          microsecond: 123_456, tzHourOffset: 0, tzMinuteOffset: 0,
+        },
+      }],
+    });
+    expect(sessionFormats(connection)).toEqual([
+      "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'",
+      "ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6'",
+      "ALTER SESSION SET NLS_TIMESTAMP_TZ_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM'",
+    ]);
+    await session.close();
+  });
+
+  it("keeps a temporal value the session format does not describe as readable text", async () => {
+    // Would fail if an unexpected DATE or TIMESTAMP rendering dropped the whole
+    // column, which hides a populated value from the preview.
+    const { connector } = fixture({
+      execute: vi.fn().mockResolvedValue({
+        metaData: [
+          { name: "REGISTERED_AT", dbType: "DB_TYPE_DATE" },
+          { name: "HAPPENED_AT", dbType: "DB_TYPE_TIMESTAMP" },
+          { name: "MILLIS_AT", dbType: "DB_TYPE_TIMESTAMP" },
+        ],
+        rows: [{
+          REGISTERED_AT: "01-SEP-26",
+          HAPPENED_AT: "2026-09-01T14:30:25.123456789",
+          MILLIS_AT: "2026-09-01 14:30:25.123",
+        }],
+      }),
+    });
+    const session = await connector.open(profile(), "secret");
+
+    const result = await session.query("SELECT registered_at, happened_at, millis_at FROM relay_test");
+
+    expect(result).toEqual({
+      columns: ["REGISTERED_AT", "HAPPENED_AT", "MILLIS_AT"],
+      unsupportedBindColumns: [],
+      rows: [{
+        REGISTERED_AT: "01-SEP-26",
+        HAPPENED_AT: {
+          year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
+          microsecond: 123_456, tzHourOffset: 0, tzMinuteOffset: 0,
+        },
+        MILLIS_AT: {
+          year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
+          microsecond: 123_000, tzHourOffset: 0, tzMinuteOffset: 0,
+        },
+      }],
+    });
+    await session.close();
+  });
+
+  it("keeps zoned timestamp text instead of omitting the column", async () => {
+    // Would fail if TIMESTAMP WITH (LOCAL) TIME ZONE columns stayed unsupported,
+    // which removed them from the preview even when the row had a value.
+    const { connector } = fixture({
+      execute: vi.fn().mockResolvedValue({
+        metaData: [
+          { name: "REGISTERED_AT", dbType: "DB_TYPE_TIMESTAMP_TZ" },
+          { name: "SEEN_AT", dbType: "DB_TYPE_TIMESTAMP_LTZ" },
+        ],
+        rows: [{
+          REGISTERED_AT: "2026-09-01 14:30:25.123456 +09:00",
+          SEEN_AT: "2026-09-01 14:30:25.123456 +00:00",
+        }],
+      }),
+    });
+    const session = await connector.open(profile(), "secret");
+
+    const result = await session.query("SELECT registered_at, seen_at FROM relay_test");
+
+    expect(result).toEqual({
+      columns: ["REGISTERED_AT", "SEEN_AT"],
+      unsupportedBindColumns: [],
+      rows: [{
+        REGISTERED_AT: "2026-09-01 14:30:25.123456 +09:00",
+        SEEN_AT: "2026-09-01 14:30:25.123456 +00:00",
+      }],
     });
     await session.close();
   });
@@ -257,8 +380,7 @@ describe("OracleConnector", () => {
 
     const result = await session.query("SELECT numbers FROM relay_test");
 
-    const options = connection.execute.mock.calls[0][2];
-    expect(options.fetchTypeHandler({ dbType: driver.DB_TYPE_NUMBER })).toEqual({
+    expect(queryOptions(connection).fetchTypeHandler({ dbType: driver.DB_TYPE_NUMBER })).toEqual({
       type: driver.DB_TYPE_VARCHAR,
     });
     expect(result).toEqual({
@@ -320,8 +442,10 @@ describe("OracleConnector", () => {
     });
     expect(convertedRows[0].HAPPENED_ON.getHours()).toBe(12);
     expect(convertedRows[0].HAPPENED_AT.getHours()).toBe(12);
+    // Would fail if a bind carried sub-millisecond digits the driver cannot read
+    // back: the restore snapshot then never matches the row it just wrote.
     expect(convertedRows[0].HAPPENED_AT.getMilliseconds()).toBe(123);
-    expect(convertedRows[0].HAPPENED_AT.getUTCMilliseconds()).toBe(123.456);
+    expect(convertedRows[0].HAPPENED_AT.getUTCMilliseconds()).toBe(123);
     await session.close();
   });
 
@@ -428,6 +552,8 @@ function fixture(overrides: Record<string, unknown> = {}) {
     DB_TYPE_NUMBER: "DB_TYPE_NUMBER",
     DB_TYPE_RAW: "DB_TYPE_RAW",
     DB_TYPE_TIMESTAMP: "DB_TYPE_TIMESTAMP",
+    DB_TYPE_TIMESTAMP_TZ: "DB_TYPE_TIMESTAMP_TZ",
+    DB_TYPE_TIMESTAMP_LTZ: "DB_TYPE_TIMESTAMP_LTZ",
     DB_TYPE_VARCHAR: "DB_TYPE_VARCHAR",
     DB_TYPE_ROWID: "DB_TYPE_ROWID",
     BIND_OUT: "BIND_OUT",
@@ -435,6 +561,27 @@ function fixture(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
   return { connection, driver, connector: new OracleConnector(driver) };
+}
+
+// The session opens with ALTER SESSION format statements, so tests read the
+// statement they care about instead of a fixed call index.
+type ExecuteCall = [string, unknown, { fetchTypeHandler: (metadata: { dbType: string }) => unknown }];
+type MockedConnection = { execute: { mock: { calls: unknown[][] } } };
+
+function executeCalls(connection: MockedConnection): ExecuteCall[] {
+  return connection.execute.mock.calls as ExecuteCall[];
+}
+
+function sessionFormats(connection: MockedConnection): string[] {
+  return executeCalls(connection)
+    .map(([sql]) => sql)
+    .filter((sql) => sql.startsWith("ALTER SESSION"));
+}
+
+function queryOptions(connection: MockedConnection): ExecuteCall[2] {
+  const call = executeCalls(connection).find(([sql]) => !sql.startsWith("ALTER SESSION"));
+  if (call === undefined) throw new Error("no query was executed");
+  return call[2];
 }
 
 function profile(overrides: Partial<ConnectionProfile> = {}): ConnectionProfile {

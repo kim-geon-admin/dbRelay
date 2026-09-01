@@ -222,8 +222,9 @@ describe("DB Relay command handler", () => {
 
   it("accepts editable preview rows only through the dedicated save and discard commands", async () => {
     // Would fail if editable source rows could use a generic command, if their
-    // preview token was omitted, or if the main process received DTO cells
-    // without converting them back to application values.
+    // preview token was omitted, if the main process received DTO cells without
+    // converting them back to application values, or if an unusable cell blocked
+    // the save instead of the run.
     const { services } = fixture();
     const saveEditedPreview = vi.fn();
     const discardEditedPreview = vi.fn();
@@ -249,29 +250,29 @@ describe("DB Relay command handler", () => {
     await expect(handler("save_edited_preview", {
       request: {
         previewId: "preview-1",
-        columns: ["ID"],
-        rows: [{ ID: Number.POSITIVE_INFINITY }],
+        columns: ["ID", "NAME", "MEMO"],
+        rows: [{
+          ID: Number.POSITIVE_INFINITY,
+          MEMO: { type: "bigint", decimal: "not-a-number" },
+        }],
       },
-    } as never)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    } as never)).resolves.toBeUndefined();
     await expect(handler("save_edited_preview", {
-      request: {
-        previewId: "preview-1",
-        columns: ["ID", "ID"],
-        rows: [{ ID: 7 }],
-      },
-    } as never)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+      request: { previewId: "preview-1", columns: ["ID", "ID"], rows: [{ ID: 7 }] },
+    } as never)).resolves.toBeUndefined();
     await expect(handler("save_edited_preview", {
-      request: {
-        previewId: "preview-1",
-        columns: ["ID", "NAME"],
-        rows: [{ ID: 7 }],
-      },
+      request: { previewId: "preview-1", columns: ["ID", "NAME"], rows: ["not-a-row"] },
     } as never)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
 
-    expect(saveEditedPreview).toHaveBeenCalledWith({
+    expect(saveEditedPreview).toHaveBeenNthCalledWith(1, {
       previewId: "preview-1",
       columns: ["ID", "NAME"],
       rows: [{ ID: 7, NAME: "edited" }],
+    });
+    expect(saveEditedPreview).toHaveBeenNthCalledWith(2, {
+      previewId: "preview-1",
+      columns: ["ID", "NAME", "MEMO"],
+      rows: [{ ID: "Infinity", MEMO: "not-a-number" }],
     });
     expect(discardEditedPreview).toHaveBeenCalledWith("preview-1");
   });

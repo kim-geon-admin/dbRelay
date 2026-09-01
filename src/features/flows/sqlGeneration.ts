@@ -2,13 +2,50 @@ export type TargetOperation = "insert" | "update" | "upsert";
 
 type SourceColumn = { sql: string; bindName: string };
 type SourceShape = { table: string; columns: SourceColumn[] };
+export type TargetSqlGeneration = { sql: string; reason?: string };
 const identifier = "(?:[\\p{L}_][\\p{L}\\p{M}\\p{Nd}_$#]*|\"(?:[^\"]|\"\")+\")";
 const qualifiedIdentifier = new RegExp(`^(?:${identifier}\\.)*${identifier}$`, "u");
 const validBindName = /^[\p{L}_][\p{L}\p{M}\p{Nd}_$#]*$/u;
+const singleTableClauses = new Set([
+  "WHERE", "ORDER", "GROUP", "HAVING", "FETCH", "OFFSET", "START", "CONNECT",
+]);
 
 export function targetOperationForSql(targetSql: string): TargetOperation {
   const keyword = firstKeyword(targetSql);
   return keyword === "UPDATE" ? "update" : keyword === "MERGE" ? "upsert" : "insert";
+}
+
+export function targetSqlGenerationFor(
+  operation: TargetOperation,
+  sourceSql: string,
+  previewColumns?: readonly string[],
+): TargetSqlGeneration {
+  const wildcardTable = parseSingleTableSelectStar(sourceSql);
+  if (wildcardTable !== undefined) {
+    if (operation !== "insert") {
+      return { sql: "", reason: "SELECT * 자동 생성은 INSERT 작업에서만 지원됩니다." };
+    }
+    if (previewColumns === undefined || previewColumns.length === 0) {
+      return { sql: "", reason: "미리보기에서 컬럼을 확인한 후 Target SQL을 생성할 수 있습니다." };
+    }
+    const columns = previewColumns.map((column) => qualifiedIdentifier.test(column) ? sourceColumn(column, column) : undefined);
+    if (columns.some((column) => column === undefined)) {
+      return { sql: "", reason: "미리보기 컬럼 이름을 Target SQL 바인드로 사용할 수 없습니다." };
+    }
+    const source = { table: wildcardTable, columns: columns as SourceColumn[] };
+    if (hasDuplicateBinds(source.columns)) {
+      return { sql: "", reason: "미리보기 컬럼에 중복된 이름이 있어 Target SQL을 생성할 수 없습니다." };
+    }
+    return { sql: `INSERT INTO ${source.table} (${source.columns.map((column) => column.sql).join(", ")})\nVALUES (${source.columns.map((column) => `:${column.bindName}`).join(", ")})` };
+  }
+  const source = parseSimpleSelect(sourceSql);
+  if (source === undefined) {
+    return { sql: "", reason: "단일 테이블의 단순 SELECT 컬럼 목록에서만 Target SQL을 생성할 수 있습니다." };
+  }
+  if (hasDuplicateBinds(source.columns)) {
+    return { sql: "", reason: "Source SQL의 SELECT 컬럼 별칭이 중복되어 Target SQL을 생성할 수 없습니다." };
+  }
+  return { sql: generateTargetSql(operation, sourceSql) };
 }
 
 export function generateTargetSql(operation: TargetOperation, sourceSql: string): string {
@@ -43,8 +80,39 @@ function parseSimpleSelect(sql: string): SourceShape | undefined {
   const match = sql.match(new RegExp(`^\\s*SELECT\\s+([\\s\\S]+?)\\s+FROM\\s+(${identifier}(?:\\.${identifier})*)(?:\\s|$)`, "iu"));
   if (!match) return undefined;
   const columns = match[1].split(",").map((projection) => projection.trim()).map(columnNameForProjection);
-  if (columns.some((column) => !column) || new Set(columns.map((column) => column!.bindName.toUpperCase())).size !== columns.length) return undefined;
+  if (columns.some((column) => !column)) return undefined;
   return { table: match[2], columns: columns as SourceColumn[] };
+}
+
+function parseSingleTableSelectStar(sql: string): string | undefined {
+  const match = new RegExp(
+    `^\\s*SELECT\\s+\\*\\s+FROM\\s+(${identifier}(?:\\.${identifier})*)\\s*([\\s\\S]*)$`,
+    "iu",
+  ).exec(sql);
+  if (match === null) return undefined;
+  return keepsSingleTable(match[2]) ? match[1] : undefined;
+}
+
+// Accepts the trailing clauses that cannot introduce a second table, with or
+// without a table alias, so a filtered SELECT * still names one INSERT target.
+function keepsSingleTable(tail: string): boolean {
+  const rest = tail.trim().replace(/;$/u, "").trim();
+  if (rest === "") return true;
+  const alias = leadingIdentifier(rest);
+  if (alias === undefined) return false;
+  if (singleTableClauses.has(alias.toUpperCase())) return true;
+  const afterAlias = rest.slice(alias.length).trim();
+  if (afterAlias === "") return true;
+  const clause = leadingIdentifier(afterAlias);
+  return clause !== undefined && singleTableClauses.has(clause.toUpperCase());
+}
+
+function leadingIdentifier(sql: string): string | undefined {
+  return new RegExp(`^${identifier}`, "u").exec(sql)?.[0];
+}
+
+function hasDuplicateBinds(columns: readonly SourceColumn[]): boolean {
+  return new Set(columns.map((column) => column.bindName.toUpperCase())).size !== columns.length;
 }
 
 function columnNameForProjection(projection: string): SourceColumn | undefined {

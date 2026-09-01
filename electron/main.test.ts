@@ -25,8 +25,15 @@ const electron = vi.hoisted(() => {
     showOpenDialog: vi.fn(),
     showSaveDialog: vi.fn(),
   };
+  const menu = {
+    buildFromTemplate: vi.fn((template: unknown[]) => template),
+    setApplicationMenu: vi.fn(),
+  };
+  const shell = {
+    openExternal: vi.fn().mockResolvedValue(undefined),
+  };
 
-  return { app, browserWindow, dialog, navigationHandlers, webContents };
+  return { app, browserWindow, dialog, menu, navigationHandlers, shell, webContents };
 });
 
 vi.mock("electron", () => ({
@@ -38,6 +45,8 @@ vi.mock("electron", () => ({
   }),
   ipcMain: { handle: vi.fn() },
   dialog: electron.dialog,
+  Menu: electron.menu,
+  shell: electron.shell,
 }));
 
 vi.mock("./infrastructure/sqliteRepository", () => ({
@@ -54,6 +63,9 @@ describe("Electron renderer startup", () => {
     electron.app.isPackaged = true;
     electron.browserWindow.loadFile.mockClear();
     electron.browserWindow.loadURL.mockClear();
+    electron.menu.buildFromTemplate.mockClear();
+    electron.menu.setApplicationMenu.mockClear();
+    electron.shell.openExternal.mockClear();
     electron.navigationHandlers.clear();
   });
 
@@ -87,5 +99,27 @@ describe("Electron renderer startup", () => {
       "https://attacker.example/renderer",
     );
     expect(preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("puts Manual immediately before Close in the Window menu and opens the user guide", async () => {
+    await import("./main");
+    await vi.waitFor(() => expect(electron.menu.setApplicationMenu).toHaveBeenCalledOnce());
+
+    const template = electron.menu.buildFromTemplate.mock.calls[0]?.[0] as Array<{
+      label?: string;
+      submenu?: Array<{ label?: string; click?: () => void }>;
+    }>;
+    const windowMenu = template.find((item) => item.label === "Window");
+    const manualIndex = windowMenu?.submenu?.findIndex((item) => item.label === "Manual");
+    const closeIndex = windowMenu?.submenu?.findIndex((item) => item.label === "Close");
+
+    expect(manualIndex).toBeDefined();
+    expect(closeIndex).toBeDefined();
+    expect(manualIndex).toBe((closeIndex ?? 1) - 1);
+
+    windowMenu?.submenu?.[manualIndex ?? -1]?.click?.();
+    expect(electron.shell.openExternal).toHaveBeenCalledWith(
+      "https://github.com/kim-geon-admin/dbRelay/blob/main/docs/user-guide.md",
+    );
   });
 });

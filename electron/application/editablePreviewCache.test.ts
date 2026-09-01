@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { EditablePreviewCache } from "./editablePreviewCache";
 
-test("replaces preview rows only when the exact column set matches and consumes them once", () => {
+test("replaces preview rows and consumes them once", () => {
   const cache = new EditablePreviewCache();
   const previewId = cache.create(["ID", "NAME"], [{ ID: 1, NAME: "Ada" }]);
 
@@ -15,12 +15,26 @@ test("replaces preview rows only when the exact column set matches and consumes 
   expect(() => cache.consume(previewId)).toThrow(/preview/i);
 });
 
-test("rejects rows with missing or extra columns", () => {
+test("keeps rows whose columns are missing or extra so the run reports them", () => {
+  // Would fail if saving edited preview rows validated the column set, which
+  // blocks the save for values the target statement could still accept.
   const cache = new EditablePreviewCache();
   const previewId = cache.create(["ID"], [{ ID: 1 }]);
 
-  expect(() => cache.save(previewId, ["ID"], [{ ID: 1, OTHER: "no" }])).toThrow(/column/i);
-  expect(() => cache.save(previewId, ["ID"], [{}])).toThrow(/column/i);
+  cache.save(previewId, ["ID"], [{ ID: 1, OTHER: "extra" }, {}]);
+
+  expect(cache.consume(previewId)).toEqual({
+    columns: ["ID"],
+    rows: [{ ID: 1, OTHER: "extra" }, {}],
+    unsupportedBindColumns: [],
+  });
+});
+
+test("reports a missing preview with a code the boundary can surface", () => {
+  const cache = new EditablePreviewCache();
+
+  expect(() => cache.save("unknown", ["ID"], [{ ID: 1 }]))
+    .toThrowError(expect.objectContaining({ code: "PREVIEW_NOT_FOUND" }));
 });
 
 test("copies byte values so later callers cannot mutate a saved preview", () => {

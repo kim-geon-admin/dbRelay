@@ -3,7 +3,7 @@ import { formatConnectorError } from "../../lib/oracleErrors";
 import { discardEditedPreview, discardStepRestore, previewFlowStep, restoreFlowStep, runFlowStep, saveEditedPreview } from "./flows.api";
 import { StepPreviewDialog } from "./StepPreviewDialog";
 import type { QueryOperation, QueryStep, StepPreview } from "./flows.types";
-import { generateTargetSql, targetOperationForSql, type TargetOperation } from "./sqlGeneration";
+import { targetOperationForSql, targetSqlGenerationFor, type TargetOperation } from "./sqlGeneration";
 import { formatOracleSql } from "./sqlFormatting";
 
 type QueryStepEditorProps = {
@@ -87,6 +87,8 @@ export function QueryStepEditor({ step, position, total, sourceConnectionId, tar
   const [actionError, setActionError] = useState<ActionError>();
   const [savedPreviewId, setSavedPreviewId] = useState<string | undefined>(undefined);
   const savedPreviewRef = useRef<string | undefined>(undefined);
+  const [targetSqlGenerationReason, setTargetSqlGenerationReason] = useState<string>();
+  const preserveSavedPreviewForGeneratedSql = useRef(false);
   const editorSessionId = useRef(globalThis.crypto?.randomUUID?.() ?? `editor-${Date.now()}`).current;
   const [restoreId, setRestoreId] = useState<string>();
   const restoreIdRef = useRef<string | undefined>(undefined);
@@ -113,6 +115,10 @@ export function QueryStepEditor({ step, position, total, sourceConnectionId, tar
     if (currentRestoreId !== undefined) void discardStepRestore(currentRestoreId);
   }, []);
   useEffect(() => {
+    if (preserveSavedPreviewForGeneratedSql.current) {
+      preserveSavedPreviewForGeneratedSql.current = false;
+      return;
+    }
     const previewId = savedPreviewRef.current;
     if (previewId !== undefined) {
       savedPreviewRef.current = undefined;
@@ -120,8 +126,21 @@ export function QueryStepEditor({ step, position, total, sourceConnectionId, tar
       void discardEditedPreview(previewId);
     }
   }, [sourceConnectionId, targetConnectionId, step.selectSql, step.upsertSql]);
-  const regenerateTargetSql = (nextOperation: TargetOperation, selectSql: string) => {
-    onChange({ ...step, operation: nextOperation as QueryOperation, selectSql, upsertSql: generateTargetSql(nextOperation, selectSql) });
+  const regenerateTargetSql = (
+    nextOperation: TargetOperation,
+    selectSql: string,
+    previewColumns?: readonly string[],
+    preserveSavedPreview = false,
+  ) => {
+    const generated = targetSqlGenerationFor(nextOperation, selectSql, previewColumns);
+    setTargetSqlGenerationReason(generated.reason);
+    // Saving a preview reports why generation failed instead of clearing the
+    // Target SQL the step already has.
+    const upsertSql = preserveSavedPreview && generated.sql === "" ? step.upsertSql : generated.sql;
+    if (preserveSavedPreview && step.upsertSql !== upsertSql) {
+      preserveSavedPreviewForGeneratedSql.current = true;
+    }
+    onChange({ ...step, operation: nextOperation as QueryOperation, selectSql, upsertSql });
   };
   const canPreview = Boolean(sourceConnectionId && step.selectSql.trim() && !pendingAction);
   const canRun = Boolean(sourceConnectionId && targetConnectionId && step.selectSql.trim() && step.upsertSql.trim() && !pendingAction);
@@ -165,6 +184,9 @@ export function QueryStepEditor({ step, position, total, sourceConnectionId, tar
       await saveEditedPreview({ previewId: preview.previewId, ...edited });
       savedPreviewRef.current = preview.previewId;
       setSavedPreviewId(preview.previewId);
+      if (operation === "insert" && /^\s*select\s+\*\s+from\s+/iu.test(step.selectSql)) {
+        regenerateTargetSql(operation, step.selectSql, edited.columns, true);
+      }
       setPreview(undefined);
     } catch (reason) {
       setActionError({ action: "save", ...connectorErrorMessage(reason) });
@@ -233,6 +255,7 @@ export function QueryStepEditor({ step, position, total, sourceConnectionId, tar
     <label>Target SQL<textarea className="sql-editor" aria-label={`Target SQL for step ${position + 1}`} value={step.upsertSql} onChange={(event) => onChange({ ...step, operation, upsertSql: event.target.value })} onKeyDown={handleSqlKeyDown("upsertSql")} /></label>
     <div className="editor-actions query-step__operation-actions"><button className="query-step__action--preview" type="button" onClick={() => void openPreview()} disabled={!canPreview}>{pendingAction === "preview" ? "미리보기 중..." : "미리보기"}</button><button className="query-step__action--run" type="button" onClick={() => void runStep()} disabled={!canRun}>{pendingAction === "run" ? "Running..." : "Run"}</button><button className="query-step__action--restore" type="button" onClick={() => void restoreStep()} aria-disabled={!restoreId || Boolean(pendingAction)}>{pendingAction === "restore" ? "복원 중..." : "복원"}</button></div>
     {operation === "insert" ? <p className="field-hint">Target SQL is generated from a simple single-table Source SQL query and can be edited.</p> : operation === "update" ? <p className="field-hint">Source SQL의 첫 번째 SELECT 컬럼으로 Target SQL의 WHERE 조건을 생성합니다. 실제 키 조건에 맞게 수정하세요.</p> : <p className="field-hint">Source SQL의 첫 번째 SELECT 컬럼으로 Target SQL의 ON 조건을 생성합니다. 실제 키 조건에 맞게 수정하세요.</p>}
+    {targetSqlGenerationReason ? <p role="status" className="field-hint">{targetSqlGenerationReason}</p> : null}
     <p className="field-hint">Target binds: {binds.length ? binds.join(", ") : "None"}</p>
     {affectedRows !== undefined ? <p role="status">{affectedRows} rows affected.{restoreSucceeded ? <span> 정상 복원되었습니다.</span> : null}</p> : null}
     {savedPreviewId ? <p role="status">사용자가 변경한 데이터로 DML 처리 합니다</p> : null}

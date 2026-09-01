@@ -1,3 +1,4 @@
+import { EditablePreviewCacheError } from "../application/editablePreviewCache";
 import type { HistoryService } from "../application/historyService";
 import { FlowTransferError, type FlowTransferService } from "../application/flowTransferService";
 import {
@@ -365,12 +366,13 @@ function isValidRequestBody(command: DbRelayCommand, body: Record<string, unknow
         && typeof body.sourceConnectionId === "string"
         && typeof body.selectSql === "string";
     case "save_edited_preview":
+      // Edited previews accept any cell content: duplicate columns, missing
+      // columns, and unparsable values are reported by the run, not the save.
       return hasOnlyKeys(body, ["previewId", "columns", "rows"])
         && typeof body.previewId === "string"
         && isStringArray(body.columns)
-        && new Set(body.columns).size === body.columns.length
         && Array.isArray(body.rows)
-        && body.rows.every((row) => isPreviewRowWithColumns(row, body.columns as string[]));
+        && body.rows.every((row) => isPlainRecord(row));
     case "discard_edited_preview":
       return hasOnlyKeys(body, ["previewId"])
         && typeof body.previewId === "string";
@@ -557,35 +559,8 @@ function projectPreview(preview: {
   };
 }
 
-function isPreviewRow(value: unknown): value is Record<string, PreviewCellDto> {
-  return isRecord(value) && Object.values(value).every(isEditablePreviewCell);
-}
-
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
-}
-
-function isPreviewRowWithColumns(value: unknown, columns: readonly string[]): boolean {
-  return isPreviewRow(value)
-    && Object.keys(value).length === columns.length
-    && columns.every((column) => Object.prototype.hasOwnProperty.call(value, column));
-}
-
-function isEditablePreviewCell(value: unknown): value is PreviewCellDto {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (!isPlainRecord(value)) return false;
-  if (value.type === "bytes") {
-    return hasOnlyKeys(value, ["type", "base64"])
-      && typeof value.base64 === "string"
-      && isBase64(value.base64);
-  }
-  if (value.type === "bigint") {
-    return hasOnlyKeys(value, ["type", "decimal"])
-      && typeof value.decimal === "string"
-      && /^-?(?:0|[1-9][0-9]*)$/u.test(value.decimal);
-  }
-  return isPreviewTemporal(value);
 }
 
 function isPreviewTemporal(value: Record<string, unknown>): boolean {
@@ -605,16 +580,27 @@ function decodePreviewRow(row: Record<string, PreviewCellDto>): NamedRow {
   ]));
 }
 
+// Never rejects a cell: an unrecognised shape keeps its text so the target
+// statement decides whether the value is usable.
 function decodePreviewCell(value: PreviewCellDto): DomainValue {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
     return value;
   }
-  if (!isPlainRecord(value)) {
-    throw serviceError("INVALID_REQUEST", "preview cell is invalid");
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (!isPlainRecord(value)) return previewCellText(value);
+  if (isBytes(value)) {
+    return isBase64(value.base64)
+      ? new Uint8Array(Buffer.from(value.base64, "base64"))
+      : value.base64;
   }
-  if (isBytes(value)) return new Uint8Array(Buffer.from(value.base64, "base64"));
-  if (isBigInt(value)) return BigInt(value.decimal);
-  return value as OracleDate | OracleTimestamp;
+  if (isBigInt(value)) {
+    return /^-?(?:0|[1-9][0-9]*)$/u.test(value.decimal) ? BigInt(value.decimal) : value.decimal;
+  }
+  return isPreviewTemporal(value) ? value as OracleDate | OracleTimestamp : previewCellText(value);
+}
+
+function previewCellText(value: PreviewCellDto): string {
+  return JSON.stringify(value) ?? String(value);
 }
 
 function isBytes(value: Record<string, unknown>): value is Record<string, unknown> & { type: "bytes"; base64: string } {
@@ -866,6 +852,8 @@ function publicDetailFor(code: string): string {
       return "flow file is invalid";
     case "RUN_NOT_FOUND":
       return "run not found";
+    case "PREVIEW_NOT_FOUND":
+      return "the edited preview is no longer available; preview the step again";
     case "TABLE_NAME_INVALID":
       return "target table name is invalid";
     case "RECOVERY_NOT_AVAILABLE":
@@ -903,6 +891,8 @@ function titleFor(code: string): string {
       return "Invalid flow file";
     case "RUN_NOT_FOUND":
       return "Run not found";
+    case "PREVIEW_NOT_FOUND":
+      return "Preview not found";
     case "TABLE_NAME_INVALID":
       return "Invalid target table";
     case "RECOVERY_NOT_AVAILABLE":
@@ -956,6 +946,7 @@ function isSafeBoundaryError(
     || error instanceof SettingsServiceError
     || error instanceof FlowServiceError
     || error instanceof FlowTransferError
+    || error instanceof EditablePreviewCacheError
     || error instanceof MigrationRunnerError
     || error instanceof RepositoryError
     || error instanceof ConnectorError

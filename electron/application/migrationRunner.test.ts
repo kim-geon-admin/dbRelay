@@ -283,6 +283,62 @@ describe("MigrationRunner", () => {
     expect(test.connector.closedProfiles).toEqual(["source", "target"]);
   });
 
+  it("saves rows whose bind column is missing and reports it when the step runs", async () => {
+    // Would fail if the save rejected an incomplete row, which hides the
+    // mapping problem the run is meant to report.
+    const test = harness("all_or_nothing");
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT id FROM customer",
+    });
+
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["ID"],
+      rows: [{}],
+    });
+
+    await expect(test.runner.runFlowStep({
+      sourceConnectionId: "source",
+      targetConnectionId: "target",
+      selectSql: "SELECT id FROM customer",
+      upsertSql: "MERGE INTO customer USING dual ON (id = :ID)",
+      previewId: preview.previewId,
+    })).rejects.toMatchObject({ code: "MAPPING_INVALID" });
+    expect(test.connector.targetTransactions()).toEqual([]);
+  });
+
+  it("binds a saved temporal preview value without rendering it as text", async () => {
+    // Would fail if a text target column stringified the structured Oracle date,
+    // which reaches the driver as "[object Object]".
+    const registeredAt = { year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25 };
+    const test = harness("all_or_nothing")
+      .sourceRowsAt(0, {
+        columns: ["USER_ID", "REGISTERED_AT"],
+        unsupportedBindColumns: [],
+        rows: [{ USER_ID: 1, REGISTERED_AT: registeredAt }],
+      })
+      .targetColumnKinds({ USER_ID: "numeric", REGISTERED_AT: "text" });
+    const preview = await test.runner.previewFlowStep({
+      sourceConnectionId: "source",
+      selectSql: "SELECT user_id, registered_at FROM SRC_USERS",
+    });
+    test.runner.saveEditedPreview({
+      previewId: preview.previewId,
+      columns: ["USER_ID", "REGISTERED_AT"],
+      rows: [{ USER_ID: 1, REGISTERED_AT: registeredAt }],
+    });
+
+    await test.runner.runFlowStep({
+      sourceConnectionId: "source", targetConnectionId: "target",
+      selectSql: "SELECT user_id, registered_at FROM SRC_USERS",
+      upsertSql: "UPDATE TGT_USERS SET REGISTERED_AT = :REGISTERED_AT WHERE USER_ID = :USER_ID",
+      previewId: preview.previewId,
+    });
+
+    expect(test.connector.executedRows).toEqual([{ USER_ID: 1, REGISTERED_AT: registeredAt }]);
+  });
+
   it("coerces saved preview values from complete target metadata", async () => {
     const test = harness("all_or_nothing")
       .sourceRowsAt(0, userPreviewRowSet())

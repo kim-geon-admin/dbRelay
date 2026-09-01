@@ -32,7 +32,7 @@ integrationTest("runs a disposable named MERGE and rollback fixture", async () =
       + "WHEN NOT MATCHED THEN INSERT (id, label, happened_on, happened_at) "
       + "VALUES (source.id, source.label, source.happened_on, source.happened_at)";
     const happenedOn = {
-      year: 2026, month: 8, day: 1, hour: 12, minute: 30, second: 0,
+      year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
     } as const;
     const happenedAt = {
       ...happenedOn,
@@ -52,10 +52,11 @@ integrationTest("runs a disposable named MERGE and rollback fixture", async () =
     expect(await session.query(
       `SELECT label, happened_on, happened_at FROM ${table} WHERE id = 1`,
     )).toMatchObject({
-      unsupportedBindColumns: ["HAPPENED_AT"],
+      unsupportedBindColumns: [],
       rows: [{
         LABEL: "merged",
         HAPPENED_ON: happenedOn,
+        HAPPENED_AT: happenedAt,
       }],
     });
     expect(await session.query(

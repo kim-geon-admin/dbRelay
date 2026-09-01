@@ -2,7 +2,10 @@ import {
   app,
   BrowserWindow,
   ipcMain,
+  Menu,
+  shell,
   type Event as ElectronEvent,
+  type MenuItemConstructorOptions,
   type WebContents,
 } from "electron";
 import { randomUUID } from "node:crypto";
@@ -27,6 +30,53 @@ import {
 
 let repository: SqliteRepository | undefined;
 const trustedRenderers = new Set<WebContents>();
+const USER_GUIDE_URL = "https://github.com/kim-geon-admin/dbRelay/blob/main/docs/user-guide.md";
+
+function installApplicationMenu() {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: "File",
+      submenu: [{ role: "quit" }],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        { role: "zoom" },
+        { type: "separator" },
+        { label: "Manual", click: () => { void shell.openExternal(USER_GUIDE_URL); } },
+        { label: "Close", role: "close" },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
 
 function createWindow(approvedUrl: string, devServerUrl: string | undefined) {
   const window = new BrowserWindow({
@@ -57,6 +107,7 @@ function createWindow(approvedUrl: string, devServerUrl: string | undefined) {
 }
 
 app.whenReady().then(() => {
+  installApplicationMenu();
   const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
   const approvedUrl = devServerUrl
     ?? pathToFileURL(join(__dirname, "../dist/index.html")).href;

@@ -16,11 +16,15 @@ function ClosablePreview({ onClose }: { onClose: () => void }) {
 test("renders preview rows in source column order and safely formats special values", () => {
   render(<StepPreviewDialog preview={{
     previewId: "preview-special-values",
-    columns: ["ID", "BIG_ID", "CREATED_AT", "PAYLOAD", "NOTE"],
+    columns: ["ID", "BIG_ID", "CREATED_ON", "CREATED_AT", "PAYLOAD", "NOTE"],
     rows: [{
       ID: 7,
       BIG_ID: { type: "bigint", decimal: "9007199254740993" },
-      CREATED_AT: { year: 2026, month: 8, day: 13, hour: 9, minute: 10, second: 11 },
+      CREATED_ON: { year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25 },
+      CREATED_AT: {
+        year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
+        microsecond: 123_456, tzHourOffset: 0, tzMinuteOffset: 0,
+      },
       PAYLOAD: { type: "bytes", base64: "AQID" },
       NOTE: null,
     }],
@@ -30,11 +34,12 @@ test("renders preview rows in source column order and safely formats special val
   const columnHeaders = screen.getAllByRole("columnheader").map((header) => header.textContent);
   expect(columnHeaders[0]).toBe("#");
   expect(columnHeaders.slice(1)).toEqual([
-    "ID", "BIG_ID", "CREATED_AT", "PAYLOAD", "NOTE",
+    "ID", "BIG_ID", "CREATED_ON", "CREATED_AT", "PAYLOAD", "NOTE",
   ]);
   expect(screen.getAllByRole("rowheader").map((header) => header.textContent)).toEqual(["1"]);
   expect(screen.getByRole("textbox", { name: "BIG_ID row 1" })).toHaveValue("9007199254740993");
-  expect(screen.getByRole("textbox", { name: "CREATED_AT row 1" })).toHaveValue('{"year":2026,"month":8,"day":13,"hour":9,"minute":10,"second":11}');
+  expect(screen.getByRole("textbox", { name: "CREATED_ON row 1" })).toHaveValue("2026-09-01 14:30:25");
+  expect(screen.getByRole("textbox", { name: "CREATED_AT row 1" })).toHaveValue("2026-09-01 14:30:25.123456");
   expect(screen.getByRole("textbox", { name: "PAYLOAD row 1" })).toHaveValue("AQID");
   expect(screen.getByRole("textbox", { name: "NOTE row 1" })).toHaveValue("");
 });
@@ -69,6 +74,36 @@ test("edits string cells and saves the changed preview rows", async () => {
   await expect(onSave).toHaveBeenCalledWith({
     columns: ["ID", "NAME"],
     rows: [{ ID: 7, NAME: "Lin" }],
+  });
+});
+
+test("saves edited DATE and TIMESTAMP preview cells as their Oracle bind values", async () => {
+  const onSave = vi.fn().mockResolvedValue(undefined);
+  render(<StepPreviewDialog preview={{
+    previewId: "preview-temporal-edit",
+    columns: ["CREATED_ON", "CREATED_AT"],
+    rows: [{
+      CREATED_ON: { year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25 },
+      CREATED_AT: {
+        year: 2026, month: 9, day: 1, hour: 14, minute: 30, second: 25,
+        microsecond: 0, tzHourOffset: 0, tzMinuteOffset: 0,
+      },
+    }],
+  }} onClose={vi.fn()} onSave={onSave} />);
+
+  fireEvent.change(screen.getByRole("textbox", { name: "CREATED_ON row 1" }), { target: { value: "2026-10-02 03:04:05" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "CREATED_AT row 1" }), { target: { value: "2026-10-02 03:04:05.123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  await expect(onSave).toHaveBeenCalledWith({
+    columns: ["CREATED_ON", "CREATED_AT"],
+    rows: [{
+      CREATED_ON: { year: 2026, month: 10, day: 2, hour: 3, minute: 4, second: 5 },
+      CREATED_AT: {
+        year: 2026, month: 10, day: 2, hour: 3, minute: 4, second: 5,
+        microsecond: 123_456, tzHourOffset: 0, tzMinuteOffset: 0,
+      },
+    }],
   });
 });
 

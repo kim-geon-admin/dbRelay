@@ -872,8 +872,14 @@ function coerceSavedPreviewBatch(
   return rows.map((row) => Object.fromEntries(Object.entries(row).map(([bindName, value]) => {
     const kind = bindKinds.get(bindName.toUpperCase());
     if (kind === undefined || value === null) return [bindName, value];
-    return [bindName, kind === "numeric" ? coerceNumericPreviewValue(value) : String(value)];
+    return [bindName, kind === "numeric" ? coerceNumericPreviewValue(value) : textPreviewValue(value)];
   })));
+}
+
+// Temporal parts and raw bytes already carry their own bind type, so only a
+// scalar is rendered as text for a non-numeric target column.
+function textPreviewValue(value: Exclude<NamedRow[string], null>): NamedRow[string] {
+  return typeof value === "object" ? value : String(value);
 }
 
 function completeBindKinds(

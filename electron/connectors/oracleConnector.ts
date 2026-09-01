@@ -78,6 +78,8 @@ export interface OracleDriver {
   readonly DB_TYPE_LONG_RAW?: OracleType;
   readonly DB_TYPE_NCHAR?: OracleType;
   readonly DB_TYPE_NVARCHAR?: OracleType;
+  readonly DB_TYPE_TIMESTAMP_TZ?: OracleType;
+  readonly DB_TYPE_TIMESTAMP_LTZ?: OracleType;
   getConnection(options: {
     user: string;
     password: string;
@@ -127,6 +129,7 @@ export class OracleConnector implements DatabaseConnectorFactory {
 
 class OracleSession implements DatabaseSession {
   private closed = false;
+  private temporalFormatsConfigured = false;
 
   constructor(
     private readonly driver: OracleDriver,
@@ -195,9 +198,10 @@ class OracleSession implements DatabaseSession {
   private async queryWithBinds(sql: string, binds: unknown) {
     this.requireOpen();
     try {
+      await this.configureTemporalFormats();
       const result = await this.connection.execute(sql, binds, {
         outFormat: this.driver.OUT_FORMAT_OBJECT,
-        fetchTypeHandler: (metadata) => metadata.dbType === this.driver.DB_TYPE_NUMBER
+        fetchTypeHandler: (metadata) => isTextFetchedColumnType(this.driver, metadata.dbType)
           ? { type: this.driver.DB_TYPE_VARCHAR }
           : undefined,
       });
@@ -249,6 +253,9 @@ class OracleSession implements DatabaseSession {
     if (rows.length === 0) {
       return 0;
     }
+    // Text binds reach a temporal column through an implicit conversion, so the
+    // target session needs the same formats the preview was rendered with.
+    await this.configureTemporalFormats();
 
     let converted: Record<string, unknown>[];
     let bindDefs: Record<string, { type: OracleType; maxSize?: number }>;
@@ -276,6 +283,22 @@ class OracleSession implements DatabaseSession {
       // Driver batch errors may contain bind data. Retain the native Oracle
       // code, but never propagate their message across the connector boundary.
       throw connectorError(error, [this.secret], true);
+    }
+  }
+
+  private async configureTemporalFormats(): Promise<void> {
+    if (this.temporalFormatsConfigured) return;
+    this.temporalFormatsConfigured = true;
+    for (const format of [
+      "NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'",
+      "NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6'",
+      "NLS_TIMESTAMP_TZ_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM'",
+    ]) {
+      await this.connection.execute(
+        `ALTER SESSION SET ${format}`,
+        [],
+        { outFormat: this.driver.OUT_FORMAT_OBJECT, fetchTypeHandler: () => undefined },
+      );
     }
   }
 
@@ -422,6 +445,14 @@ function convertQueryValue(
     }
     return undefined;
   }
+  // A session format the parser does not recognise keeps the raw text: the
+  // preview shows the value instead of dropping the whole column.
+  if (dbType === driver.DB_TYPE_DATE && typeof value === "string") {
+    return oracleDateFromString(value) ?? value;
+  }
+  if (dbType === driver.DB_TYPE_TIMESTAMP && typeof value === "string") {
+    return oracleTimestampFromString(value) ?? value;
+  }
   if (typeof value === "string" || typeof value === "boolean") {
     return value;
   }
@@ -435,7 +466,11 @@ function convertQueryValue(
     if (dbType === driver.DB_TYPE_DATE) {
       return oracleDateFromDate(value);
     }
-    if (dbType === driver.DB_TYPE_TIMESTAMP) {
+    // A zoned column arrives as the same instant in the local zone: the driver
+    // has already resolved its offset, so it is read like a plain timestamp.
+    if (dbType === driver.DB_TYPE_TIMESTAMP
+      || dbType === driver.DB_TYPE_TIMESTAMP_TZ
+      || dbType === driver.DB_TYPE_TIMESTAMP_LTZ) {
       return oracleTimestampFromDate(value);
     }
   }
@@ -564,11 +599,6 @@ function dictionaryIdentifier(value: string): string | undefined {
 
 function isSupportedColumnType(driver: OracleDriver, metadata: OracleMetadata): boolean {
   const { dbType } = metadata;
-  if (dbType === driver.DB_TYPE_TIMESTAMP
-    && metadata.precision !== undefined
-    && metadata.precision > 3) {
-    return false;
-  }
   return [
     driver.DB_TYPE_BOOLEAN,
     driver.DB_TYPE_DATE,
@@ -583,7 +613,17 @@ function isSupportedColumnType(driver: OracleDriver, metadata: OracleMetadata): 
     driver.DB_TYPE_NCHAR,
     driver.DB_TYPE_NVARCHAR,
     driver.DB_TYPE_ROWID,
+    driver.DB_TYPE_TIMESTAMP_TZ,
+    driver.DB_TYPE_TIMESTAMP_LTZ,
   ].some((supported) => supported !== undefined && supported === dbType);
+}
+
+// Only NUMBER: node-oracledb Thin mode holds NUMBER as text internally, so
+// asking for a string keeps every digit. Temporal columns are decoded into a
+// JavaScript Date first, and a string fetch would only run Date.toString() on
+// it ("Tue Sep 01 2026 14:00:22 GMT+0900"), losing the session format.
+function isTextFetchedColumnType(driver: OracleDriver, dbType: OracleType): boolean {
+  return dbType === driver.DB_TYPE_NUMBER;
 }
 
 function oracleDateFromDate(value: Date): OracleDate {
@@ -620,6 +660,62 @@ function mapBindRow(row: NamedRow, bindNames: readonly string[]): Record<string,
     result[bindName] = toOracleBindValue(match[1]);
   }
   return result;
+}
+
+// The session formats set by configureTemporalFormats, plus the ISO-like
+// variants another session setting can produce: the separator may be a space or
+// T, the time and fraction may be absent, the fraction may hold one to nine
+// digits, and a zone offset may follow.
+const temporalText =
+  /^(\d{4,5})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,9}))?)?\s*(Z|[+-]\d{2}:?\d{2})?$/u;
+
+function temporalPartsFromString(
+  value: string,
+): { date: OracleDate; fraction: string; zone?: string } | undefined {
+  const match = temporalText.exec(value.trim());
+  if (match === null) return undefined;
+  const [year, month, day] = match.slice(1, 4).map(Number);
+  const [hour, minute, second] = match.slice(4, 7)
+    .map((part) => part === undefined ? 0 : Number(part));
+  const date = { year, month, day, hour, minute, second };
+  if (!isRepresentableDate(date)) return undefined;
+  return { date, fraction: match[7] ?? "", ...(match[8] === undefined ? {} : { zone: match[8] }) };
+}
+
+function isRepresentableDate(value: OracleDate): boolean {
+  const candidate = new Date(
+    value.year, value.month - 1, value.day, value.hour, value.minute, value.second,
+  );
+  return candidate.getFullYear() === value.year
+    && candidate.getMonth() === value.month - 1
+    && candidate.getDate() === value.day
+    && candidate.getHours() === value.hour
+    && candidate.getMinutes() === value.minute
+    && candidate.getSeconds() === value.second;
+}
+
+function oracleDateFromString(value: string): OracleDate | undefined {
+  return temporalPartsFromString(value)?.date;
+}
+
+function oracleTimestampFromString(value: string): OracleTimestamp | undefined {
+  const parts = temporalPartsFromString(value);
+  if (parts === undefined) return undefined;
+  return {
+    ...parts.date,
+    microsecond: parts.fraction === "" ? 0 : Number(parts.fraction.padEnd(6, "0").slice(0, 6)),
+    ...zoneOffset(parts.zone),
+  };
+}
+
+function zoneOffset(zone: string | undefined): { tzHourOffset: number; tzMinuteOffset: number } {
+  if (zone === undefined || zone === "Z") return { tzHourOffset: 0, tzMinuteOffset: 0 };
+  const sign = zone.startsWith("-") ? -1 : 1;
+  const digits = zone.slice(1).replace(":", "");
+  return {
+    tzHourOffset: sign * Number(digits.slice(0, 2)),
+    tzMinuteOffset: sign * Number(digits.slice(2, 4)),
+  };
 }
 
 function returnedRowIds(
@@ -760,11 +856,15 @@ function structuredDate(value: OracleDate, millisecond: number): Date {
   return result;
 }
 
+// The driver decodes a fetched TIMESTAMP into a JavaScript Date, so a value is
+// only ever read back at millisecond resolution. Binding at the same resolution
+// keeps a written row equal to the row the next read reports, which is what the
+// restore snapshot compares against.
 function structuredTimestamp(value: OracleTimestamp): Date {
   if (value.microsecond < 0 || value.microsecond > 999_999) {
     throw new ConnectorError("BIND_TYPE_UNSUPPORTED", "invalid Oracle timestamp precision");
   }
-  const result = new PreciseOracleTimestampDate(value);
+  const result = structuredDate(value, Math.floor(value.microsecond / 1_000));
   validateStructuredDate(value, result);
   return result;
 }
@@ -777,29 +877,6 @@ function validateStructuredDate(value: OracleDate, result: Date): void {
   }
 }
 
-class PreciseOracleTimestampDate extends Date {
-  private readonly oracleMicrosecond: number;
-
-  constructor(value: OracleTimestamp) {
-    super(
-      value.year,
-      value.month - 1,
-      value.day,
-      value.hour,
-      value.minute,
-      value.second,
-      Math.floor(value.microsecond / 1_000),
-    );
-    this.oracleMicrosecond = value.microsecond;
-  }
-
-  override getUTCMilliseconds(): number {
-    // node-oracledb Thin mode multiplies this accessor by 1_000_000 when
-    // encoding TIMESTAMP fractional seconds, so a fractional millisecond
-    // preserves the domain model's full six-digit microsecond value.
-    return this.oracleMicrosecond / 1_000;
-  }
-}
 
 function isOracleDate(value: DomainValue): value is OracleDate {
   return isRecord(value)

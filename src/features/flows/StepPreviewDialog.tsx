@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
-import type { PreviewBigIntDto, PreviewBytesDto, PreviewCellDto, PreviewFlowStepDto } from "../../lib/desktop";
+import type {
+  PreviewBigIntDto,
+  PreviewBytesDto,
+  PreviewCellDto,
+  PreviewFlowStepDto,
+  PreviewOracleDateDto,
+  PreviewOracleTimestampDto,
+} from "../../lib/desktop";
 
 type StepPreviewDialogProps = {
   preview: PreviewFlowStepDto;
@@ -18,9 +25,57 @@ function isBigInt(value: Exclude<PreviewCellDto, null>): value is PreviewBigIntD
     && "decimal" in value && typeof value.decimal === "string";
 }
 
+function isOracleDate(value: Exclude<PreviewCellDto, null>): value is PreviewOracleDateDto {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && ["year", "month", "day", "hour", "minute", "second"].every((key) =>
+      typeof (value as Record<string, unknown>)[key] === "number");
+}
+
+function isOracleTimestamp(value: Exclude<PreviewCellDto, null>): value is PreviewOracleTimestampDto {
+  return isOracleDate(value)
+    && "microsecond" in value && typeof value.microsecond === "number"
+    && "tzHourOffset" in value && typeof value.tzHourOffset === "number"
+    && "tzMinuteOffset" in value && typeof value.tzMinuteOffset === "number";
+}
+
+function twoDigits(value: number): string { return String(value).padStart(2, "0"); }
+
+function formatOracleDate(value: PreviewOracleDateDto): string {
+  return `${String(value.year).padStart(4, "0")}-${twoDigits(value.month)}-${twoDigits(value.day)} ${twoDigits(value.hour)}:${twoDigits(value.minute)}:${twoDigits(value.second)}`;
+}
+
+function temporalValueFromDraft(original: PreviewCellDto | undefined, draft: string): PreviewCellDto {
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{6}))?$/u.exec(draft);
+  if (match === null || original === undefined || original === null) return draft;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  if (!isValidTemporalParts(year, month, day, hour, minute, second)) return draft;
+  if (isOracleTimestamp(original) && match[7] !== undefined) {
+    return { year, month, day, hour, minute, second, microsecond: Number(match[7]),
+      tzHourOffset: original.tzHourOffset, tzMinuteOffset: original.tzMinuteOffset };
+  }
+  if (isOracleDate(original) && match[7] === undefined) return { year, month, day, hour, minute, second };
+  return draft;
+}
+
+function isValidTemporalParts(year: number, month: number, day: number, hour: number, minute: number, second: number): boolean {
+  const candidate = new Date(year, month - 1, day, hour, minute, second);
+  return candidate.getFullYear() === year && candidate.getMonth() === month - 1 && candidate.getDate() === day
+    && candidate.getHours() === hour && candidate.getMinutes() === minute && candidate.getSeconds() === second;
+}
+
+function saveErrorMessage(reason: unknown): string {
+  return typeof reason === "object" && reason !== null
+    && "code" in reason && typeof reason.code === "string"
+    && "detail" in reason && typeof reason.detail === "string"
+    ? `${reason.code} · ${reason.detail}`
+    : "Unable to save edited preview data.";
+}
+
 function editableText(value: PreviewCellDto): string {
   if (value === null) return "";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (isOracleTimestamp(value)) return `${formatOracleDate(value)}.${String(value.microsecond).padStart(6, "0")}`;
+  if (isOracleDate(value)) return formatOracleDate(value);
   if (isBigInt(value)) return value.decimal;
   if (isBytes(value)) return value.base64;
   return JSON.stringify(value);
@@ -82,8 +137,8 @@ export function StepPreviewDialog({ preview, onClose, onSave }: StepPreviewDialo
     setSaveError(undefined);
     try {
       await onSave({ columns: [...preview.columns], rows });
-    } catch {
-      setSaveError("Unable to save edited preview data.");
+    } catch (reason) {
+      setSaveError(saveErrorMessage(reason));
     } finally {
       setSaving(false);
     }
@@ -146,7 +201,7 @@ export function StepPreviewDialog({ preview, onClose, onSave }: StepPreviewDialo
   const updateDraft = (rowIndex: number, column: string, draft: string) => {
     const key = `${rowIndex}:${column}`;
     setDrafts((current) => ({ ...current, [key]: draft }));
-    changeCell(rowIndex, column, draft === "" ? null : draft);
+    changeCell(rowIndex, column, draft === "" ? null : temporalValueFromDraft(rows[rowIndex]?.[column], draft));
   };
 
   return <div className="step-preview-backdrop" role="presentation">
